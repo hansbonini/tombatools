@@ -98,12 +98,46 @@ func (d *WFMFileDecoder) DecodeGlyphs(reader io.Reader, header *WFMHeader) ([]ui
 		}
 	}
 
-	// Read glyph data (implementation depends on the actual glyph format)
-	// For now, we'll create placeholders
+	// Read glyph data - each glyph has a specific structure
+	// Since we don't have the exact specification, we'll read what we can
 	for i := uint16(0); i < header.TotalGlyphs; i++ {
-		glyphs[i] = Glyph{
-			Data: []byte{}, // This would be populated based on actual glyph format
+		glyph := Glyph{}
+		
+		// Try to read glyph structure: GlyphClut, GlyphHeight, GlyphWidth, GlyphHandakuten
+		if err := binary.Read(reader, binary.LittleEndian, &glyph.GlyphClut); err != nil {
+			// If we can't read the structure, create empty glyph
+			glyph = Glyph{
+				GlyphClut:       0,
+				GlyphHeight:     0,
+				GlyphWidth:      0,
+				GlyphHandakuten: 0,
+				GlyphImage:      []byte{},
+			}
+		} else {
+			// Continue reading the rest of the glyph structure
+			if err := binary.Read(reader, binary.LittleEndian, &glyph.GlyphHeight); err != nil {
+				glyph.GlyphHeight = 0
+			}
+			if err := binary.Read(reader, binary.LittleEndian, &glyph.GlyphWidth); err != nil {
+				glyph.GlyphWidth = 0
+			}
+			if err := binary.Read(reader, binary.LittleEndian, &glyph.GlyphHandakuten); err != nil {
+				glyph.GlyphHandakuten = 0
+			}
+			
+			// Calculate expected image size (4bpp = 4 bits per pixel = 0.5 bytes per pixel)
+			if glyph.GlyphWidth > 0 && glyph.GlyphHeight > 0 {
+				imageSize := (int(glyph.GlyphWidth) * int(glyph.GlyphHeight) + 1) / 2
+				if imageSize > 0 && imageSize < 10000 { // Reasonable size limit
+					glyph.GlyphImage = make([]byte, imageSize)
+					if _, err := io.ReadFull(reader, glyph.GlyphImage); err != nil {
+						glyph.GlyphImage = []byte{}
+					}
+				}
+			}
 		}
+		
+		glyphs[i] = glyph
 	}
 
 	return glyphPointers, glyphs, nil

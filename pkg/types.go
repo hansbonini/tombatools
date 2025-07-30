@@ -14,7 +14,11 @@ type WFMHeader struct {
 
 // Glyph represents the data for a single glyph
 type Glyph struct {
-	Data []byte
+	GlyphClut       uint16 // Color lookup table data
+	GlyphHeight     uint16 // Height of the glyph
+	GlyphWidth      uint16 // Width of the glyph
+	GlyphHandakuten uint16 // Handakuten marker (Japanese diacritical mark)
+	GlyphImage      []byte // Raw image data
 }
 
 // Dialogue represents a dialog entry in the WFM file

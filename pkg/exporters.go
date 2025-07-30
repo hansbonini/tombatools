@@ -3,6 +3,9 @@ package pkg
 import (
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +17,53 @@ type WFMFileExporter struct{}
 // NewWFMExporter creates a new WFM exporter instance
 func NewWFMExporter() *WFMFileExporter {
 	return &WFMFileExporter{}
+}
+
+// convert4bppToPNG converts 4bpp linear image data to PNG
+func convert4bppToPNG(imageData []byte, width, height uint16) (*image.RGBA, error) {
+	if width == 0 || height == 0 {
+		return nil, fmt.Errorf("invalid dimensions: width=%d, height=%d", width, height)
+	}
+
+	// Create RGBA image
+	img := image.NewRGBA(image.Rect(0, 0, int(width), int(height)))
+	
+	// 4bpp means 2 pixels per byte
+	expectedBytes := (int(width) * int(height) + 1) / 2
+	if len(imageData) < expectedBytes {
+		return nil, fmt.Errorf("insufficient image data: expected at least %d bytes, got %d", expectedBytes, len(imageData))
+	}
+
+	// Simple grayscale palette for 4bpp (0-15 intensity levels)
+	palette := make([]color.RGBA, 16)
+	for i := 0; i < 16; i++ {
+		intensity := uint8((i * 255) / 15)
+		palette[i] = color.RGBA{intensity, intensity, intensity, 255}
+	}
+
+	pixelIndex := 0
+	for y := 0; y < int(height); y++ {
+		for x := 0; x < int(width); x++ {
+			byteIndex := pixelIndex / 2
+			if byteIndex >= len(imageData) {
+				break
+			}
+
+			var pixelValue uint8
+			if pixelIndex%2 == 0 {
+				// Even pixel: lower 4 bits (little endian)
+				pixelValue = imageData[byteIndex] & 0x0F
+			} else {
+				// Odd pixel: upper 4 bits (little endian)
+				pixelValue = (imageData[byteIndex] & 0xF0) >> 4
+			}
+
+			img.Set(x, y, palette[pixelValue])
+			pixelIndex++
+		}
+	}
+
+	return img, nil
 }
 
 // WFMFileJSON represents the JSON structure for exporting WFM files
@@ -69,11 +119,11 @@ func (e *WFMFileExporter) ExportToJSON(wfm *WFMFile, writer io.Writer) error {
 	return nil
 }
 
-// ExportGlyphs exports individual glyph data to separate files
+// ExportGlyphs exports all glyphs as a single PNG file in horizontal layout
 func (e *WFMFileExporter) ExportGlyphs(wfm *WFMFile, outputDir string) error {
-	glyphDir := filepath.Join(outputDir, "glyphs")
-	if err := os.MkdirAll(glyphDir, 0755); err != nil {
-		return fmt.Errorf("failed to create glyph directory: %w", err)
+	// Create output directory if it doesn't exist
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
 	// Validate that we have the expected number of glyphs
@@ -83,12 +133,136 @@ func (e *WFMFileExporter) ExportGlyphs(wfm *WFMFile, outputDir string) error {
 		return fmt.Errorf("glyph count mismatch: expected %d, got %d", expectedGlyphs, actualGlyphs)
 	}
 
+	// Filter valid glyphs and calculate dimensions
+	var validGlyphs []Glyph
+	var validIndices []int
+	maxWidth := uint16(0)
+	maxHeight := uint16(0)
+
 	for i, glyph := range wfm.Glyphs {
-		filename := filepath.Join(glyphDir, fmt.Sprintf("glyph_%04d.bin", i))
-		if err := os.WriteFile(filename, glyph.Data, 0644); err != nil {
-			return fmt.Errorf("failed to write glyph %d: %w", i, err)
+		if len(glyph.GlyphImage) > 0 && glyph.GlyphWidth > 0 && glyph.GlyphHeight > 0 {
+			validGlyphs = append(validGlyphs, glyph)
+			validIndices = append(validIndices, i)
+			if glyph.GlyphWidth > maxWidth {
+				maxWidth = glyph.GlyphWidth
+			}
+			if glyph.GlyphHeight > maxHeight {
+				maxHeight = glyph.GlyphHeight
+			}
 		}
 	}
+
+	if len(validGlyphs) == 0 {
+		return fmt.Errorf("no valid glyphs found")
+	}
+
+	// Calculate grid layout - try to make it more horizontal than vertical
+	glyphCount := len(validGlyphs)
+	// Use approximately square root for columns, but favor more columns for horizontal layout
+	cols := int(float64(glyphCount)*0.7 + 0.5) // This will create more columns than rows
+	if cols > glyphCount {
+		cols = glyphCount
+	}
+	if cols < 1 {
+		cols = 1
+	}
+	rows := (glyphCount + cols - 1) / cols // Ceiling division
+
+	// Calculate total image dimensions
+	totalWidth := cols * int(maxWidth)
+	totalHeight := rows * int(maxHeight)
+
+	fmt.Printf("Creating horizontal layout: %d columns × %d rows (%dx%d pixels per glyph)\n", 
+		cols, rows, maxWidth, maxHeight)
+
+	// Create a combined image
+	combinedImg := image.NewRGBA(image.Rect(0, 0, totalWidth, totalHeight))
+
+	// Simple grayscale palette for 4bpp (0-15 intensity levels)
+	palette := make([]color.RGBA, 16)
+	for i := 0; i < 16; i++ {
+		intensity := uint8((i * 255) / 15)
+		palette[i] = color.RGBA{intensity, intensity, intensity, 255}
+	}
+
+	// Red color for separators
+	redColor := color.RGBA{255, 0, 0, 255}
+
+	// Place glyphs in grid layout
+	for glyphIndex, glyph := range validGlyphs {
+		// Calculate grid position
+		col := glyphIndex % cols
+		row := glyphIndex / cols
+		
+		// Calculate pixel offset
+		offsetX := col * int(maxWidth)
+		offsetY := row * int(maxHeight)
+
+		// Convert this glyph to image data
+		width := int(glyph.GlyphWidth)
+		height := int(glyph.GlyphHeight)
+
+		// Process 4bpp data
+		pixelIndex := 0
+		for y := 0; y < height; y++ {
+			for x := 0; x < width; x++ {
+				byteIndex := pixelIndex / 2
+				if byteIndex >= len(glyph.GlyphImage) {
+					break
+				}
+
+				var pixelValue uint8
+				if pixelIndex%2 == 0 {
+					// Even pixel: lower 4 bits (little endian)
+					pixelValue = glyph.GlyphImage[byteIndex] & 0x0F
+				} else {
+					// Odd pixel: upper 4 bits (little endian)
+					pixelValue = (glyph.GlyphImage[byteIndex] & 0xF0) >> 4
+				}
+
+				combinedImg.Set(offsetX+x, offsetY+y, palette[pixelValue])
+				pixelIndex++
+			}
+		}
+
+		// Draw red separators around each glyph to show its actual dimensions
+		// Top border (horizontal line)
+		for x := 0; x < width; x++ {
+			combinedImg.Set(offsetX+x, offsetY, redColor)
+		}
+		// Bottom border (horizontal line)  
+		for x := 0; x < width; x++ {
+			combinedImg.Set(offsetX+x, offsetY+height-1, redColor)
+		}
+		// Left border (vertical line)
+		for y := 0; y < height; y++ {
+			combinedImg.Set(offsetX, offsetY+y, redColor)
+		}
+		// Right border (vertical line)
+		for y := 0; y < height; y++ {
+			combinedImg.Set(offsetX+width-1, offsetY+y, redColor)
+		}
+
+		fmt.Printf("Added glyph %d: %dx%d pixels at (%d,%d) grid[%d,%d] (CLUT: %d, Handakuten: %d)\n", 
+			validIndices[glyphIndex], glyph.GlyphWidth, glyph.GlyphHeight, 
+			offsetX, offsetY, col, row, glyph.GlyphClut, glyph.GlyphHandakuten)
+	}
+
+	// Save the combined PNG directly in the output directory
+	pngFile := filepath.Join(outputDir, "all_glyphs.png")
+	file, err := os.Create(pngFile)
+	if err != nil {
+		return fmt.Errorf("failed to create combined PNG file: %w", err)
+	}
+	defer file.Close()
+
+	if err := png.Encode(file, combinedImg); err != nil {
+		return fmt.Errorf("failed to encode combined PNG: %w", err)
+	}
+
+	fmt.Printf("Exported %d glyphs to horizontal PNG: %dx%d pixels (%d columns × %d rows)\n", 
+		len(validGlyphs), totalWidth, totalHeight, cols, rows)
+	fmt.Printf("Saved to: %s\n", pngFile)
 
 	return nil
 }
