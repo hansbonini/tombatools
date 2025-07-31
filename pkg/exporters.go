@@ -132,6 +132,7 @@ type DialogueEntry struct {
 	BoxWidth   *int   `yaml:"box_width,omitempty"`
 	BoxHeight  *int   `yaml:"box_height,omitempty"`
 	FontHeight int    `yaml:"font_height"`
+	FontClut   uint16 `yaml:"font_clut"`
 	Text       string `yaml:"text"`
 }
 
@@ -142,11 +143,12 @@ type DialoguesYAML struct {
 }
 
 // processDialogueText processes dialogue text, extracting box dimensions and cleaning control codes
-func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs []Glyph) (text string, dialogueType string, boxWidth *int, boxHeight *int, fontHeight int) {
+func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs []Glyph) (text string, dialogueType string, boxWidth *int, boxHeight *int, fontHeight int, fontClut uint16) {
 	decodedText := ""
 	var width, height *int
 	entryType := "event"    // Default to event type
 	detectedFontHeight := 8 // Default to 8, will be updated when we find actual glyphs
+	detectedFontClut := uint16(0) // Default CLUT
 
 	// Process dialogue data in 2-byte chunks
 	for i := 0; i+1 < len(rawData); i += 2 {
@@ -185,7 +187,7 @@ func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs 
 		if glyphID >= GLYPH_ID_BASE && glyphID <= 0xFFF0 {
 			actualGlyphID := glyphID - GLYPH_ID_BASE
 
-			// Check glyph height to determine font height
+			// Check glyph height and clut to determine font height and clut
 			if glyphs != nil && int(actualGlyphID) < len(glyphs) {
 				glyph := glyphs[actualGlyphID]
 				if glyph.GlyphHeight == 16 {
@@ -193,6 +195,8 @@ func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs 
 				} else if glyph.GlyphHeight == 24 {
 					detectedFontHeight = 24
 				}
+				// Update font CLUT from the actual glyph data
+				detectedFontClut = glyph.GlyphClut
 			}
 
 			// Try to decode character
@@ -212,7 +216,7 @@ func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs 
 		}
 	}
 
-	return decodedText, entryType, width, height, detectedFontHeight
+	return decodedText, entryType, width, height, detectedFontHeight, detectedFontClut
 }
 
 // getSpecialCharacterCode returns the formatted string for special control codes
@@ -264,8 +268,8 @@ func (e *WFMFileExporter) ExportDialogues(wfm *WFMFile, outputDir string) error 
 	// Process each dialogue using data already extracted in DecodeDialogues
 	var dialogueEntries []DialogueEntry
 	for i, dialogue := range wfm.Dialogues {
-		// Process dialogue text and extract box dimensions
-		text, dialogueType, boxWidth, boxHeight, fontHeight := processDialogueText(dialogue.Data, glyphMapping, wfm.Glyphs)
+		// Process dialogue text and extract box dimensions, font height and CLUT
+		text, dialogueType, boxWidth, boxHeight, fontHeight, fontClut := processDialogueText(dialogue.Data, glyphMapping, wfm.Glyphs)
 
 		dialogueEntry := DialogueEntry{
 			ID:         i,
@@ -273,6 +277,7 @@ func (e *WFMFileExporter) ExportDialogues(wfm *WFMFile, outputDir string) error 
 			BoxWidth:   boxWidth,
 			BoxHeight:  boxHeight,
 			FontHeight: fontHeight,
+			FontClut:   fontClut,
 			Text:       text,
 		}
 		dialogueEntries = append(dialogueEntries, dialogueEntry)

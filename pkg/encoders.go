@@ -230,6 +230,7 @@ func (e *WFMFileEncoder) mapGlyphsByDialogue(dialogues []DialogueEntry) (map[int
 	
 	for _, dialogue := range dialogues {
 		fontHeight := int(dialogue.FontHeight)
+		fontClut := dialogue.FontClut
 		
 		// Inicializar o mapa para esta altura de fonte se não existir
 		if globalGlyphCache[fontHeight] == nil {
@@ -255,7 +256,7 @@ func (e *WFMFileEncoder) mapGlyphsByDialogue(dialogues []DialogueEntry) (map[int
 			// Verificar se o caractere já foi mapeado para esta altura de fonte
 			if _, exists := globalGlyphCache[fontHeight][char]; !exists {
 				// Tentar carregar o glyph
-				glyph, err := e.loadSingleGlyph(char, fontHeight)
+				glyph, err := e.loadSingleGlyph(char, fontHeight, fontClut)
 				if err != nil {
 					fmt.Printf("Warning: Could not load glyph for character '%c' (U+%04X) at font height %d: %v\n", char, char, fontHeight, err)
 					continue
@@ -609,9 +610,10 @@ func (e *WFMFileEncoder) writeWFMFile(wfm *WFMFile, outputFile string) error {
 func (e *WFMFileEncoder) loadGlyphsForCharacters(characters []rune) ([]Glyph, error) {
 	var glyphs []Glyph
 	fontHeight := 16 // Default font height, pode ser configurável no futuro
+	defaultClut := uint16(0) // CLUT padrão
 	
 	for _, char := range characters {
-		glyph, err := e.loadSingleGlyph(char, fontHeight)
+		glyph, err := e.loadSingleGlyph(char, fontHeight, defaultClut)
 		if err != nil {
 			// Se não encontrar o glyph, log o erro mas continue
 			fmt.Printf("Warning: Could not load glyph for character '%c' (U+%04X): %v\n", char, char, err)
@@ -624,7 +626,7 @@ func (e *WFMFileEncoder) loadGlyphsForCharacters(characters []rune) ([]Glyph, er
 }
 
 // loadSingleGlyph loads a single glyph from the fonts directory and converts it to 4bpp linear little endian
-func (e *WFMFileEncoder) loadSingleGlyph(char rune, fontHeight int) (Glyph, error) {
+func (e *WFMFileEncoder) loadSingleGlyph(char rune, fontHeight int, fontClut uint16) (Glyph, error) {
 	// Determinar o caminho do arquivo PNG baseado no caractere
 	glyphPath, err := e.getGlyphPath(char, fontHeight)
 	if err != nil {
@@ -638,14 +640,14 @@ func (e *WFMFileEncoder) loadSingleGlyph(char rune, fontHeight int) (Glyph, erro
 	}
 	
 	// Converter para 4bpp linear little endian
-	imageData, err := e.convertTo4bppLinearLE(img)
+	imageData, err := e.convertTo4bppLinearLE(img, fontHeight)
 	if err != nil {
 		return Glyph{}, fmt.Errorf("failed to convert to 4bpp: %w", err)
 	}
 	
 	bounds := img.Bounds()
 	glyph := Glyph{
-		GlyphClut:       0, // TODO: implementar CLUT se necessário
+		GlyphClut:       fontClut,
 		GlyphHeight:     uint16(bounds.Dy()),
 		GlyphWidth:      uint16(bounds.Dx()),
 		GlyphHandakuten: 0, // TODO: implementar se necessário
@@ -692,8 +694,8 @@ func (e *WFMFileEncoder) loadPNGImage(path string) (image.Image, error) {
 	return img, nil
 }
 
-// convertTo4bppLinearLE converts an image to 4bpp linear little endian format
-func (e *WFMFileEncoder) convertTo4bppLinearLE(img image.Image) ([]byte, error) {
+// convertTo4bppLinearLE converts an image to 4bpp linear little endian format using proper CLUT palette mapping
+func (e *WFMFileEncoder) convertTo4bppLinearLE(img image.Image, fontHeight int) ([]byte, error) {
 	bounds := img.Bounds()
 	width := bounds.Dx()
 	height := bounds.Dy()
@@ -710,12 +712,12 @@ func (e *WFMFileEncoder) convertTo4bppLinearLE(img image.Image) ([]byte, error) 
 			byteIndex := y*bytesPerRow + x/2
 			
 			// Primeiro pixel (4 bits baixos)
-			pixel1 := e.getPixelIntensity(img, bounds.Min.X+x, bounds.Min.Y+y)
+			pixel1 := e.getPixelIntensity(img, bounds.Min.X+x, bounds.Min.Y+y, fontHeight)
 			
 			// Segundo pixel (4 bits altos), se existir
 			var pixel2 uint8
 			if x+1 < width {
-				pixel2 = e.getPixelIntensity(img, bounds.Min.X+x+1, bounds.Min.Y+y)
+				pixel2 = e.getPixelIntensity(img, bounds.Min.X+x+1, bounds.Min.Y+y, fontHeight)
 			}
 			
 			// Combinar os dois pixels em um byte (little endian: pixel1 nos bits baixos)
@@ -726,8 +728,8 @@ func (e *WFMFileEncoder) convertTo4bppLinearLE(img image.Image) ([]byte, error) 
 	return data, nil
 }
 
-// getPixelIntensity gets the 4-bit intensity value of a pixel
-func (e *WFMFileEncoder) getPixelIntensity(img image.Image, x, y int) uint8 {
+// getPixelIntensity gets the 4-bit palette index value of a pixel by matching RGB colors to CLUT palette
+func (e *WFMFileEncoder) getPixelIntensity(img image.Image, x, y int, fontHeight int) uint8 {
 	r, g, b, a := img.At(x, y).RGBA()
 	
 	// Se o pixel for transparente, retornar 0
@@ -735,13 +737,57 @@ func (e *WFMFileEncoder) getPixelIntensity(img image.Image, x, y int) uint8 {
 		return 0
 	}
 	
-	// Converter para escala de cinza usando a fórmula padrão
-	gray := (299*r + 587*g + 114*b) / 1000
+	// Converter de 16-bit para 8-bit RGB
+	r8 := uint8(r >> 8)
+	g8 := uint8(g >> 8)
+	b8 := uint8(b >> 8)
 	
-	// Converter de 16-bit para 4-bit (0-15)
-	intensity := uint8((gray >> 12) & 0x0F)
+	// Selecionar a paleta correta baseada na altura da fonte
+	var currentPalette [16]uint16
+	if fontHeight == 24 {
+		// Use EventClut para altura 24
+		currentPalette = EventClut
+	} else {
+		// Use DialogueClut para outras alturas
+		currentPalette = DialogueClut
+	}
 	
-	return intensity
+	// Função para converter cor PSX 16-bit para RGB 8-bit
+	psxToRGB := func(psxColor uint16) (uint8, uint8, uint8) {
+		if psxColor == 0 {
+			return 0, 0, 0 // Cor 0 é transparente/preta
+		}
+		r := uint8((psxColor & 0x1F) << 3)         // Red: bits 0-4
+		g := uint8(((psxColor >> 5) & 0x1F) << 3)  // Green: bits 5-9
+		b := uint8(((psxColor >> 10) & 0x1F) << 3) // Blue: bits 10-14
+		return r, g, b
+	}
+	
+	// Procurar a cor mais próxima na paleta
+	bestMatch := uint8(0)
+	minDistance := uint32(0xFFFFFFFF)
+	
+	for i, psxColor := range currentPalette {
+		pr, pg, pb := psxToRGB(psxColor)
+		
+		// Calcular distância euclidiana no espaço RGB
+		dr := int32(r8) - int32(pr)
+		dg := int32(g8) - int32(pg)
+		db := int32(b8) - int32(pb)
+		distance := uint32(dr*dr + dg*dg + db*db)
+		
+		if distance < minDistance {
+			minDistance = distance
+			bestMatch = uint8(i)
+		}
+		
+		// Se encontrou uma correspondência exata, parar
+		if distance == 0 {
+			break
+		}
+	}
+	
+	return bestMatch
 }
 
 // NewWFMEncoder creates a new WFM encoder instance
