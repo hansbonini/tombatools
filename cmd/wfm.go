@@ -1,6 +1,5 @@
 /*
 Copyright © 2025 NAME HERE <EMAIL ADDRESS>
-
 */
 package cmd
 
@@ -14,18 +13,33 @@ import (
 
 // wfmCmd represents the wfm command
 var wfmCmd = &cobra.Command{
-	Use:   "wfm [input_file] [output_directory]",
+	Use:   "wfm",
+	Short: "Process WFM font files",
+	Long: `Process WFM font files used in Tomba! PSX game.
+	
+Available subcommands:
+- decode: Extract data from WFM files (glyphs, dialogues)
+- encode: Create WFM files from extracted data (coming soon)
+
+Examples:
+  tombatools wfm decode CFNT999H.WFM ./output/
+  tombatools wfm encode ./input/ output.wfm`,
+}
+
+// wfmDecodeCmd represents the wfm decode command
+var wfmDecodeCmd = &cobra.Command{
+	Use:   "decode [input_file] [output_directory]",
 	Short: "Extract data from WFM font files",
 	Long: `Extract data from WFM font files used in Tomba! PSX game.
 	
 This command will:
 - Parse the WFM file structure
-- Extract glyph data to separate binary files
-- Extract dialogue data to separate binary files  
-- Generate a JSON file with metadata and structure information
+- Extract glyph data to PNG files
+- Extract dialogue data to YAML file with font height information
+- Generate glyph mapping for text decoding
 
 Example:
-  tombatools wfm CFNT999H.WFM ./output/`,
+  tombatools wfm decode CFNT999H.WFM ./output/`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		inputFile := args[0]
@@ -50,8 +64,38 @@ Example:
 	},
 }
 
+// wfmEncodeCmd represents the wfm encode command
+var wfmEncodeCmd = &cobra.Command{
+	Use:   "encode dialogue.yaml [output_file]",
+	Short: "Create WFM font files from extracted data",
+	Long: `Create WFM font files from extracted data (PNG glyphs and YAML dialogues).
+	
+This command will:
+- Read dialogue data from YAML file
+- Read PNG glyph files from the proper font directory based on font height
+- Generate a WFM file with the correct structure
+
+Example:
+  tombatools wfm encode dialogue.yaml output.wfm`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		inputFile := args[0]
+		outputFile := args[1]
+
+		fmt.Printf("Input file: %s\n", inputFile)
+		fmt.Printf("Output WFM file: %s\n", outputFile)
+
+		// TODO: Implement WFM encoding functionality
+		return fmt.Errorf("encode functionality is not yet implemented")
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(wfmCmd)
+
+	// Add subcommands to wfm
+	wfmCmd.AddCommand(wfmDecodeCmd)
+	wfmCmd.AddCommand(wfmEncodeCmd)
 
 	// Here you will define your flags and configuration settings.
 
