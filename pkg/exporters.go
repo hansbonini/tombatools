@@ -1,14 +1,19 @@
 package pkg
 
 import (
-	"encoding/json"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"image"
 	"image/color"
 	"image/png"
-	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // WFMFileExporter implements the WFMExporter interface
@@ -17,59 +22,6 @@ type WFMFileExporter struct{}
 // NewWFMExporter creates a new WFM exporter instance
 func NewWFMExporter() *WFMFileExporter {
 	return &WFMFileExporter{}
-}
-
-// WFMFileJSON represents the JSON structure for exporting WFM files
-type WFMFileJSON struct {
-	Header struct {
-		Magic                 string `json:"magic"`
-		Padding               uint32 `json:"padding"`
-		DialoguePointerTable  uint32 `json:"dialogue_pointer_table"`
-		TotalDialogues        uint16 `json:"total_dialogues"`
-		TotalGlyphs           uint16 `json:"total_glyphs"`
-	} `json:"header"`
-	GlyphPointerTable     []uint16 `json:"glyph_pointer_table"`
-	GlyphCount            int      `json:"glyph_count"`
-	DialoguePointerTable  []uint32 `json:"dialogue_pointer_table"`
-	DialogueCount         int      `json:"dialogue_count"`
-}
-
-// ExportToJSON exports the WFM file structure to JSON format
-func (e *WFMFileExporter) ExportToJSON(wfm *WFMFile, writer io.Writer) error {
-	// Validate that arrays match header counts
-	expectedGlyphs := int(wfm.Header.TotalGlyphs)
-	actualGlyphs := len(wfm.Glyphs)
-	if actualGlyphs != expectedGlyphs {
-		return fmt.Errorf("glyph count mismatch in JSON export: expected %d, got %d", expectedGlyphs, actualGlyphs)
-	}
-
-	expectedDialogues := int(wfm.Header.TotalDialogues)
-	actualDialogues := len(wfm.Dialogues)
-	if actualDialogues != expectedDialogues {
-		return fmt.Errorf("dialogue count mismatch in JSON export: expected %d, got %d", expectedDialogues, actualDialogues)
-	}
-
-	jsonData := WFMFileJSON{
-		GlyphPointerTable:    wfm.GlyphPointerTable,
-		GlyphCount:           int(wfm.Header.TotalGlyphs),
-		DialoguePointerTable: wfm.DialoguePointerTable,
-		DialogueCount:        int(wfm.Header.TotalDialogues),
-	}
-
-	// Convert header
-	jsonData.Header.Magic = string(wfm.Header.Magic[:])
-	jsonData.Header.Padding = wfm.Header.Padding
-	jsonData.Header.DialoguePointerTable = wfm.Header.DialoguePointerTable
-	jsonData.Header.TotalDialogues = wfm.Header.TotalDialogues
-	jsonData.Header.TotalGlyphs = wfm.Header.TotalGlyphs
-
-	encoder := json.NewEncoder(writer)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(jsonData); err != nil {
-		return fmt.Errorf("failed to encode JSON: %w", err)
-	}
-
-	return nil
 }
 
 // ExportGlyphs exports each glyph as an individual PNG file
@@ -173,13 +125,20 @@ func (e *WFMFileExporter) ExportGlyphs(wfm *WFMFile, outputDir string) error {
 	return nil
 }
 
-// ExportDialogues exports individual dialog data to separate files
-func (e *WFMFileExporter) ExportDialogues(wfm *WFMFile, outputDir string) error {
-	dialogDir := filepath.Join(outputDir, "dialogues")
-	if err := os.MkdirAll(dialogDir, 0755); err != nil {
-		return fmt.Errorf("failed to create dialogue directory: %w", err)
-	}
+// DialogueEntry represents a single dialogue with decoded text
+type DialogueEntry struct {
+	ID   int    `yaml:"id"`
+	Text string `yaml:"text"`
+}
 
+// DialoguesYAML represents the complete dialogues structure for YAML export
+type DialoguesYAML struct {
+	TotalDialogues int             `yaml:"total_dialogues"`
+	Dialogues      []DialogueEntry `yaml:"dialogues"`
+}
+
+// ExportDialogues exports dialogues as a single YAML file with text decoding
+func (e *WFMFileExporter) ExportDialogues(wfm *WFMFile, outputDir string) error {
 	// Validate that we have the expected number of dialogues
 	expectedDialogues := int(wfm.Header.TotalDialogues)
 	actualDialogues := len(wfm.Dialogues)
@@ -187,14 +146,184 @@ func (e *WFMFileExporter) ExportDialogues(wfm *WFMFile, outputDir string) error 
 		return fmt.Errorf("dialogue count mismatch: expected %d, got %d", expectedDialogues, actualDialogues)
 	}
 
+	// Build glyph hash to character mapping from font files
+	glyphsDir := filepath.Join(outputDir, "glyphs")
+	fontDir := "fonts" // User should have a 'fonts' directory with character-named PNG files
+	glyphMapping, err := e.buildGlyphMapping(glyphsDir, fontDir)
+	if err != nil {
+		fmt.Printf("Warning: Could not build glyph mapping from font directory: %v\n", err)
+		fmt.Printf("Dialogues will be exported without text decoding\n")
+	}
+
+	// Process each dialogue using data already extracted in DecodeDialogues
+	var dialogueEntries []DialogueEntry
 	for i, dialogue := range wfm.Dialogues {
-		filename := filepath.Join(dialogDir, fmt.Sprintf("dialogue_%04d.bin", i))
-		if err := os.WriteFile(filename, dialogue.Data, 0644); err != nil {
-			return fmt.Errorf("failed to write dialogue %d: %w", i, err)
+		decodedText := ""
+		
+		// Process dialogue data in 2-byte chunks
+		for j := 0; j+1 < len(dialogue.Data); j += 2 {
+			// Read 2 bytes as little endian uint16
+			glyphID := binary.LittleEndian.Uint16(dialogue.Data[j:j+2])
+			
+			// Convert to glyph index (subtract 0x8000 base)
+			if glyphID >= 0x8000 {
+				actualGlyphID := glyphID - 0x8000
+				
+				// Try to decode character
+				if glyphMapping != nil {
+					if char, found := glyphMapping[actualGlyphID]; found {
+						decodedText += char
+					} else {
+						decodedText += fmt.Sprintf("[%d]", actualGlyphID)
+					}
+				} else {
+					decodedText += fmt.Sprintf("[%d]", actualGlyphID)
+				}
+			} else {
+				// Handle special codes
+				decodedText += fmt.Sprintf("<%04X>", glyphID)
+			}
+		}
+
+		dialogueEntry := DialogueEntry{
+			ID:   i,
+			Text: decodedText,
+		}
+		dialogueEntries = append(dialogueEntries, dialogueEntry)
+	}
+
+	// Create YAML structure
+	dialoguesYAML := DialoguesYAML{
+		TotalDialogues: expectedDialogues,
+		Dialogues:      dialogueEntries,
+	}
+
+	// Export to YAML file in output root directory
+	yamlFile := filepath.Join(outputDir, "dialogues.yaml")
+	yamlWriter, err := os.Create(yamlFile)
+	if err != nil {
+		return fmt.Errorf("failed to create YAML file: %w", err)
+	}
+	defer yamlWriter.Close()
+
+	encoder := yaml.NewEncoder(yamlWriter)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(dialoguesYAML); err != nil {
+		return fmt.Errorf("failed to encode YAML: %w", err)
+	}
+
+	fmt.Printf("Exported %d dialogues to YAML: %s\n", len(dialogueEntries), yamlFile)
+	return nil
+}
+
+// buildGlyphMapping creates a mapping from glyph ID to character by comparing glyph images
+func (e *WFMFileExporter) buildGlyphMapping(glyphsDir, fontDir string) (map[uint16]string, error) {
+	mapping := make(map[uint16]string)
+	
+	// Check if font directory exists
+	if _, err := os.Stat(fontDir); os.IsNotExist(err) {
+		return nil, fmt.Errorf("font directory '%s' does not exist", fontDir)
+	}
+
+	// Get list of font files recursively from fonts directory and subdirectories
+	fontFiles := make([]string, 0)
+	err := filepath.Walk(fontDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && strings.ToLower(filepath.Ext(path)) == ".png" {
+			fontFiles = append(fontFiles, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to walk font directory: %w", err)
+	}
+
+	// Calculate hashes for each font file
+	fontHashes := make(map[string]string) // hash -> character name
+	for _, fontFile := range fontFiles {
+		hash, err := e.calculateImageHash(fontFile)
+		if err != nil {
+			continue // Skip files that can't be processed
+		}
+		
+		// Extract character from filename (remove .png extension)
+		baseName := filepath.Base(fontFile)
+		fileName := strings.TrimSuffix(baseName, ".png")
+		
+		// Convert hexadecimal Unicode code to character
+		var charName string
+		if unicodeCode, err := strconv.ParseInt(fileName, 16, 32); err == nil {
+			// Valid hexadecimal Unicode code point
+			charName = string(rune(unicodeCode))
+		} else {
+			// Fallback to filename if not a valid hex code
+			charName = fileName
+		}
+		
+		fontHashes[hash] = charName
+	}
+
+	// Calculate hashes for each glyph file and find matches
+	glyphFiles, err := filepath.Glob(filepath.Join(glyphsDir, "glyph_*.png"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to list glyph files: %w", err)
+	}
+
+	for _, glyphFile := range glyphFiles {
+		hash, err := e.calculateImageHash(glyphFile)
+		if err != nil {
+			continue // Skip files that can't be processed
+		}
+
+		// Extract glyph ID from filename
+		baseName := filepath.Base(glyphFile)
+		var glyphID int
+		if _, err := fmt.Sscanf(baseName, "glyph_%04d.png", &glyphID); err != nil {
+			continue
+		}
+
+		// Check if hash matches any font file
+		if charName, found := fontHashes[hash]; found {
+			mapping[uint16(glyphID)] = charName
+			fmt.Printf("Mapped glyph %d to character '%s'\n", glyphID, charName)
 		}
 	}
 
-	return nil
+	fmt.Printf("Built glyph mapping: %d glyphs mapped to characters\n", len(mapping))
+	return mapping, nil
+}
+
+// calculateImageHash calculates a simple hash of an image file for comparison
+func (e *WFMFileExporter) calculateImageHash(imagePath string) (string, error) {
+	file, err := os.Open(imagePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	img, err := png.Decode(file)
+	if err != nil {
+		return "", err
+	}
+
+	// Calculate hash based on image content
+	hasher := sha256.New()
+	bounds := img.Bounds()
+	
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r, g, b, a := img.At(x, y).RGBA()
+			// Write pixel data to hasher
+			binary.Write(hasher, binary.LittleEndian, uint16(r))
+			binary.Write(hasher, binary.LittleEndian, uint16(g))
+			binary.Write(hasher, binary.LittleEndian, uint16(b))
+			binary.Write(hasher, binary.LittleEndian, uint16(a))
+		}
+	}
+
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 // WFMFileProcessor combines decoder and exporter functionality
@@ -229,18 +358,6 @@ func (p *WFMFileProcessor) Process(inputFile string, outputDir string) error {
 	// Create output directory
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
-	}
-
-	// Export to JSON
-	jsonFile := filepath.Join(outputDir, "info.json")
-	jsonWriter, err := os.Create(jsonFile)
-	if err != nil {
-		return fmt.Errorf("failed to create JSON file: %w", err)
-	}
-	defer jsonWriter.Close()
-
-	if err := p.ExportToJSON(wfm, jsonWriter); err != nil {
-		return fmt.Errorf("failed to export JSON: %w", err)
 	}
 
 	// Export glyphs

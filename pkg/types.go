@@ -46,7 +46,7 @@ type WFMFile struct {
 	Header               WFMHeader
 	GlyphPointerTable    []uint16
 	Glyphs               []Glyph
-	DialoguePointerTable []uint32
+	DialoguePointerTable []uint16
 	Dialogues            []Dialogue
 }
 
@@ -55,7 +55,7 @@ type WFMDecoder interface {
 	Decode(reader io.Reader) (*WFMFile, error)
 	DecodeHeader(reader io.Reader) (*WFMHeader, error)
 	DecodeGlyphs(reader io.Reader, header *WFMHeader) ([]uint16, []Glyph, error)
-	DecodeDialogues(reader io.Reader, header *WFMHeader) ([]uint32, []Dialogue, error)
+	DecodeDialogues(reader io.Reader, header *WFMHeader) ([]uint16, []Dialogue, error)
 }
 
 // WFMExporter interface defines methods for exporting WFM data

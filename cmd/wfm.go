@@ -43,9 +43,8 @@ Example:
 		}
 
 		fmt.Println("WFM file processed successfully!")
-		fmt.Printf("- Metadata saved to: %s\n", filepath.Join(outputDir, "info.json"))
 		fmt.Printf("- Individual glyph PNG files saved to: %s\n", filepath.Join(outputDir, "glyphs"))
-		fmt.Printf("- Dialogues extracted to: %s\n", filepath.Join(outputDir, "dialogues"))
+		fmt.Printf("- Dialogues extracted to: %s\n", filepath.Join(outputDir, "dialogues.yaml"))
 
 		return nil
 	},

@@ -67,6 +67,7 @@ func (d *WFMFileDecoder) DecodeHeader(reader io.Reader) (*WFMHeader, error) {
 	if err := binary.Read(reader, binary.LittleEndian, &header.DialoguePointerTable); err != nil {
 		return nil, fmt.Errorf("failed to read dialogue pointer table: %w", err)
 	}
+	fmt.Printf("Header DialoguePointerTable offset: %d (0x%X)\n", header.DialoguePointerTable, header.DialoguePointerTable)
 
 	// Read total dialogs count
 	if err := binary.Read(reader, binary.LittleEndian, &header.TotalDialogues); err != nil {
@@ -144,22 +145,70 @@ func (d *WFMFileDecoder) DecodeGlyphs(reader io.Reader, header *WFMHeader) ([]ui
 }
 
 // DecodeDialogs reads the dialog pointer table and dialog data
-func (d *WFMFileDecoder) DecodeDialogues(reader io.Reader, header *WFMHeader) ([]uint32, []Dialogue, error) {
-	dialoguePointers := make([]uint32, header.TotalDialogues)
+func (d *WFMFileDecoder) DecodeDialogues(reader io.Reader, header *WFMHeader) ([]uint16, []Dialogue, error) {
+	dialoguePointers := make([]uint16, header.TotalDialogues)
 	dialogues := make([]Dialogue, header.TotalDialogues)
+
+	fmt.Printf("Reading %d dialogue pointers starting from current position\n", header.TotalDialogues)
 
 	// Read dialog pointer table
 	for i := uint16(0); i < header.TotalDialogues; i++ {
 		if err := binary.Read(reader, binary.LittleEndian, &dialoguePointers[i]); err != nil {
 			return nil, nil, fmt.Errorf("failed to read dialog pointer %d: %w", i, err)
 		}
+		if i < 10 { // Show first 10 pointers for debugging
+			fmt.Printf("Dialogue pointer %d: %d (0x%X)\n", i, dialoguePointers[i], dialoguePointers[i])
+		}
 	}
 
-	// Read dialog data (implementation depends on the actual dialog format)
-	// For now, we'll create placeholders
+	// Calculate base offset for dialogue data (start of dialogue pointer table)
+	dialogueTableStart := int64(header.DialoguePointerTable)
+
+	// Read dialogue data using pointers
 	for i := uint16(0); i < header.TotalDialogues; i++ {
-		dialogues[i] = Dialogue{
-			Data: []byte{}, // This would be populated based on actual dialog format
+		pointer := dialoguePointers[i]
+		
+		// Skip null pointers
+		if pointer == 0 {
+			dialogues[i] = Dialogue{Data: []byte{}}
+			continue
+		}
+
+		// Calculate absolute offset: base address + relative pointer
+		absoluteOffset := dialogueTableStart + int64(pointer)
+		
+		// Create a seeker from the reader if possible
+		if seeker, ok := reader.(io.ReadSeeker); ok {
+			// Seek to dialogue position
+			_, err := seeker.Seek(absoluteOffset, io.SeekStart)
+			if err != nil {
+				fmt.Printf("Warning: Could not seek to dialogue %d at offset %d: %v\n", i, absoluteOffset, err)
+				dialogues[i] = Dialogue{Data: []byte{}}
+				continue
+			}
+
+			// Read dialogue data until 0xFFFF terminator
+			var dialogueData []byte
+			for {
+				var word uint16
+				if err := binary.Read(reader, binary.LittleEndian, &word); err != nil {
+					break // End of file or read error
+				}
+				
+				// Check for terminator
+				if word == 0xFFFF {
+					break
+				}
+				
+				// Add word to dialogue data (little endian)
+				dialogueData = append(dialogueData, byte(word&0xFF))
+				dialogueData = append(dialogueData, byte((word>>8)&0xFF))
+			}
+			
+			dialogues[i] = Dialogue{Data: dialogueData}
+		} else {
+			// If we can't seek, create empty dialogue
+			dialogues[i] = Dialogue{Data: []byte{}}
 		}
 	}
 
