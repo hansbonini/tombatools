@@ -159,7 +159,7 @@ func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs 
 		}
 
 		// Handle [INIT TEXT BOX] with width and height parameters
-		if glyphID == 0xFFFA { // [INIT TEXT BOX]
+		if glyphID == INIT_TEXT_BOX { // [INIT TEXT BOX]
 			entryType = "dialogue" // Set type to dialogue when INIT TEXT BOX is found
 			// Next 2 bytes are width
 			if i+4 <= len(rawData) {
@@ -177,13 +177,13 @@ func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs 
 		}
 
 		// Handle Termination markers
-		if glyphID == 0xFFFE || glyphID == 0xFFFF {
+		if glyphID == TERMINATOR_1 || glyphID == TERMINATOR_2 {
 			break
 		}
 
-		// Convert to glyph index (subtract 0x8000 base)
-		if glyphID >= 0x8000 && glyphID <= 0xFFF0 {
-			actualGlyphID := glyphID - 0x8000
+		// Convert to glyph index (subtract GLYPH_ID_BASE)
+		if glyphID >= GLYPH_ID_BASE && glyphID <= 0xFFF0 {
+			actualGlyphID := glyphID - GLYPH_ID_BASE
 
 			// Check glyph height to determine font height
 			if glyphs != nil && int(actualGlyphID) < len(glyphs) {
@@ -218,25 +218,25 @@ func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs 
 // getSpecialCharacterCode returns the formatted string for special control codes
 func getSpecialCharacterCode(code uint16) string {
 	switch code {
-	case 0xFFF3:
+	case HALT:
 		return "[HALT]"
-	case 0xFFF4:
+	case F4:
 		return "[F4]"
-	case 0xFFF5:
+	case PROMPT:
 		return "[PROMPT]"
-	case 0xFFF6:
+	case F6:
 		return "[F6]" // args: 2
-	case 0xFFF7:
+	case CHANGE_COLOR_TO:
 		return "[CHANGE COLOR TO]" // args: 1
-	case 0xFFF8:
+	case INIT_TAIL:
 		return "[INIT TAIL]" // args: 2
-	case 0xFFF9:
+	case PAUSE_FOR:
 		return "[PAUSE FOR]" // args: 1
-	case 0xFFFB:
+	case DOUBLE_NEWLINE:
 		return "\n\n"
-	case 0xFFFC:
+	case WAIT_FOR_INPUT:
 		return "[WAIT FOR INPUT]"
-	case 0xFFFD:
+	case NEWLINE:
 		return "\n" // Convert [NEWLINE] to actual newline
 	default:
 		return fmt.Sprintf("<%04X>", code)

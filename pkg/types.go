@@ -2,6 +2,31 @@ package pkg
 
 import "io"
 
+// Special control codes constants
+const (
+	// Text box initialization
+	INIT_TEXT_BOX = 0xFFFA
+	
+	// Special control codes
+	HALT              = 0xFFF3
+	F4                = 0xFFF4
+	PROMPT            = 0xFFF5
+	F6                = 0xFFF6 // args: 2
+	CHANGE_COLOR_TO   = 0xFFF7 // args: 1
+	INIT_TAIL         = 0xFFF8 // args: 2
+	PAUSE_FOR         = 0xFFF9 // args: 1
+	DOUBLE_NEWLINE    = 0xFFFB
+	WAIT_FOR_INPUT    = 0xFFFC
+	NEWLINE           = 0xFFFD
+	
+	// Termination markers
+	TERMINATOR_1 = 0xFFFE
+	TERMINATOR_2 = 0xFFFF
+	
+	// Glyph ID base offset
+	GLYPH_ID_BASE = 0x8000
+)
+
 // Default CLUT palettes for glyphs (converted from byte arrays to uint16)
 var DialogueClut = [16]uint16{
 	0x0000, 0x0400, 0x4E73, 0x2529,
@@ -63,6 +88,15 @@ type WFMExporter interface {
 	ExportToJSON(wfm *WFMFile, writer io.Writer) error
 	ExportGlyphs(wfm *WFMFile, outputDir string) error
 	ExportDialogues(wfm *WFMFile, outputDir string) error
+}
+
+// WFMEncoder interface defines methods for encoding WFM files from extracted data
+type WFMEncoder interface {
+	Encode(yamlFile string, outputFile string) error
+	LoadDialogues(yamlFile string) ([]DialogueEntry, error)
+	LoadGlyphs(glyphsDir string, fontHeight int) ([]Glyph, error)
+	BuildWFMFile(dialogues []DialogueEntry, glyphs []Glyph) (*WFMFile, error)
+	WriteWFMFile(wfm *WFMFile, outputFile string) error
 }
 
 // WFMProcessor combines decoder and exporter functionality

@@ -85,8 +85,16 @@ Example:
 		fmt.Printf("Input file: %s\n", inputFile)
 		fmt.Printf("Output WFM file: %s\n", outputFile)
 
-		// TODO: Implement WFM encoding functionality
-		return fmt.Errorf("encode functionality is not yet implemented")
+		// Create WFM encoder
+		encoder := pkg.NewWFMEncoder()
+
+		// Encode the YAML file to WFM
+		if err := encoder.Encode(inputFile, outputFile); err != nil {
+			return fmt.Errorf("failed to encode WFM file: %w", err)
+		}
+
+		fmt.Println("WFM file encoded successfully!")
+		return nil
 	},
 }
 
