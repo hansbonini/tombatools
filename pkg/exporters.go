@@ -145,7 +145,7 @@ type DialoguesYAML struct {
 func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs []Glyph) (text string, dialogueType string, boxWidth *int, boxHeight *int, fontHeight int) {
 	decodedText := ""
 	var width, height *int
-	entryType := "event" // Default to event type
+	entryType := "event"    // Default to event type
 	detectedFontHeight := 8 // Default to 8, will be updated when we find actual glyphs
 
 	// Process dialogue data in 2-byte chunks
@@ -232,10 +232,8 @@ func getSpecialCharacterCode(code uint16) string {
 		return "[INIT TAIL]" // args: 2
 	case 0xFFF9:
 		return "[PAUSE FOR]" // args: 1
-	case 0xFFFA:
-		return "[INIT TEXT BOX]" // args: 2 (w and h)
 	case 0xFFFB:
-		return "[CLEAR FEED & LINE RETURN]"
+		return "\n\n"
 	case 0xFFFC:
 		return "[WAIT FOR INPUT]"
 	case 0xFFFD:
