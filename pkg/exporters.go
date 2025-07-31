@@ -44,8 +44,8 @@ func (e *WFMFileExporter) ExportGlyphs(wfm *WFMFile, outputDir string) error {
 		if psxColor == 0 {
 			return color.RGBA{0, 0, 0, 0} // Transparent for color 0
 		}
-		r := uint8((psxColor & 0x1F) << 3)        // Red: bits 0-4
-		g := uint8(((psxColor >> 5) & 0x1F) << 3) // Green: bits 5-9  
+		r := uint8((psxColor & 0x1F) << 3)         // Red: bits 0-4
+		g := uint8(((psxColor >> 5) & 0x1F) << 3)  // Green: bits 5-9
 		b := uint8(((psxColor >> 10) & 0x1F) << 3) // Blue: bits 10-14
 		return color.RGBA{r, g, b, 255}
 	}
@@ -115,8 +115,8 @@ func (e *WFMFileExporter) ExportGlyphs(wfm *WFMFile, outputDir string) error {
 		}
 		file.Close()
 
-		fmt.Printf("Exported glyph %d: %dx%d pixels (CLUT: %d, Handakuten: %d) -> %s\n", 
-			glyphIndex, glyph.GlyphWidth, glyph.GlyphHeight, 
+		fmt.Printf("Exported glyph %d: %dx%d pixels (CLUT: %d, Handakuten: %d) -> %s\n",
+			glyphIndex, glyph.GlyphWidth, glyph.GlyphHeight,
 			glyph.GlyphClut, glyph.GlyphHandakuten, filename)
 		exportedCount++
 	}
@@ -127,14 +127,122 @@ func (e *WFMFileExporter) ExportGlyphs(wfm *WFMFile, outputDir string) error {
 
 // DialogueEntry represents a single dialogue with decoded text
 type DialogueEntry struct {
-	ID   int    `yaml:"id"`
-	Text string `yaml:"text"`
+	ID         int    `yaml:"id"`
+	Type       string `yaml:"type"`
+	BoxWidth   *int   `yaml:"box_width,omitempty"`
+	BoxHeight  *int   `yaml:"box_height,omitempty"`
+	FontHeight int    `yaml:"font_height"`
+	Text       string `yaml:"text"`
 }
 
 // DialoguesYAML represents the complete dialogues structure for YAML export
 type DialoguesYAML struct {
 	TotalDialogues int             `yaml:"total_dialogues"`
 	Dialogues      []DialogueEntry `yaml:"dialogues"`
+}
+
+// processDialogueText processes dialogue text, extracting box dimensions and cleaning control codes
+func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs []Glyph) (text string, dialogueType string, boxWidth *int, boxHeight *int, fontHeight int) {
+	decodedText := ""
+	var width, height *int
+	entryType := "event" // Default to event type
+	detectedFontHeight := 8 // Default to 8, will be updated when we find actual glyphs
+
+	// Process dialogue data in 2-byte chunks
+	for i := 0; i+1 < len(rawData); i += 2 {
+		// Read 2 bytes as little endian uint16
+		glyphID := binary.LittleEndian.Uint16(rawData[i : i+2])
+
+		// Check for termination
+		if glyphID == 0xFFFF {
+			break
+		}
+
+		// Handle [INIT TEXT BOX] with width and height parameters
+		if glyphID == 0xFFFA { // [INIT TEXT BOX]
+			entryType = "dialogue" // Set type to dialogue when INIT TEXT BOX is found
+			// Next 2 bytes are width
+			if i+4 <= len(rawData) {
+				w := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
+				width = &w
+				i += 2 // Skip width bytes
+			}
+			// Next 2 bytes are height
+			if i+4 <= len(rawData) {
+				h := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
+				height = &h
+				i += 2 // Skip height bytes
+			}
+			continue // Don't add [INIT TEXT BOX] to text
+		}
+
+		// Handle Termination markers
+		if glyphID == 0xFFFE || glyphID == 0xFFFF {
+			break
+		}
+
+		// Convert to glyph index (subtract 0x8000 base)
+		if glyphID >= 0x8000 && glyphID <= 0xFFF0 {
+			actualGlyphID := glyphID - 0x8000
+
+			// Check glyph height to determine font height
+			if glyphs != nil && int(actualGlyphID) < len(glyphs) {
+				glyph := glyphs[actualGlyphID]
+				if glyph.GlyphHeight == 16 {
+					detectedFontHeight = 16
+				} else if glyph.GlyphHeight == 24 {
+					detectedFontHeight = 24
+				}
+			}
+
+			// Try to decode character
+			if glyphMapping != nil {
+				if char, found := glyphMapping[actualGlyphID]; found {
+					decodedText += char
+				} else {
+					decodedText += fmt.Sprintf("[%04X]", glyphID)
+				}
+			} else {
+				decodedText += fmt.Sprintf("[%04X]", glyphID)
+			}
+		} else {
+			// Handle special control codes
+			specialCode := getSpecialCharacterCode(glyphID)
+			decodedText += specialCode
+		}
+	}
+
+	return decodedText, entryType, width, height, detectedFontHeight
+}
+
+// getSpecialCharacterCode returns the formatted string for special control codes
+func getSpecialCharacterCode(code uint16) string {
+	switch code {
+	case 0xFFF3:
+		return "[HALT]"
+	case 0xFFF4:
+		return "[F4]"
+	case 0xFFF5:
+		return "[PROMPT]"
+	case 0xFFF6:
+		return "[F6]" // args: 2
+	case 0xFFF7:
+		return "[CHANGE COLOR TO]" // args: 1
+	case 0xFFF8:
+		return "[INIT TAIL]" // args: 2
+	case 0xFFF9:
+		return "[PAUSE FOR]" // args: 1
+	case 0xFFFA:
+		return "[INIT TEXT BOX]" // args: 2 (w and h)
+	case 0xFFFB:
+		return "[CLEAR FEED & LINE RETURN]"
+	case 0xFFFC:
+		return "[WAIT FOR INPUT]"
+	case 0xFFFD:
+		return "\n" // Convert [NEWLINE] to actual newline
+	default:
+		return fmt.Sprintf("<%04X>", code)
+	}
 }
 
 // ExportDialogues exports dialogues as a single YAML file with text decoding
@@ -158,36 +266,16 @@ func (e *WFMFileExporter) ExportDialogues(wfm *WFMFile, outputDir string) error 
 	// Process each dialogue using data already extracted in DecodeDialogues
 	var dialogueEntries []DialogueEntry
 	for i, dialogue := range wfm.Dialogues {
-		decodedText := ""
-		
-		// Process dialogue data in 2-byte chunks
-		for j := 0; j+1 < len(dialogue.Data); j += 2 {
-			// Read 2 bytes as little endian uint16
-			glyphID := binary.LittleEndian.Uint16(dialogue.Data[j:j+2])
-			
-			// Convert to glyph index (subtract 0x8000 base)
-			if glyphID >= 0x8000 {
-				actualGlyphID := glyphID - 0x8000
-				
-				// Try to decode character
-				if glyphMapping != nil {
-					if char, found := glyphMapping[actualGlyphID]; found {
-						decodedText += char
-					} else {
-						decodedText += fmt.Sprintf("[%d]", actualGlyphID)
-					}
-				} else {
-					decodedText += fmt.Sprintf("[%d]", actualGlyphID)
-				}
-			} else {
-				// Handle special codes
-				decodedText += fmt.Sprintf("<%04X>", glyphID)
-			}
-		}
+		// Process dialogue text and extract box dimensions
+		text, dialogueType, boxWidth, boxHeight, fontHeight := processDialogueText(dialogue.Data, glyphMapping, wfm.Glyphs)
 
 		dialogueEntry := DialogueEntry{
-			ID:   i,
-			Text: decodedText,
+			ID:         i,
+			Type:       dialogueType,
+			BoxWidth:   boxWidth,
+			BoxHeight:  boxHeight,
+			FontHeight: fontHeight,
+			Text:       text,
 		}
 		dialogueEntries = append(dialogueEntries, dialogueEntry)
 	}
@@ -208,6 +296,7 @@ func (e *WFMFileExporter) ExportDialogues(wfm *WFMFile, outputDir string) error 
 
 	encoder := yaml.NewEncoder(yamlWriter)
 	encoder.SetIndent(2)
+
 	if err := encoder.Encode(dialoguesYAML); err != nil {
 		return fmt.Errorf("failed to encode YAML: %w", err)
 	}
@@ -219,7 +308,7 @@ func (e *WFMFileExporter) ExportDialogues(wfm *WFMFile, outputDir string) error 
 // buildGlyphMapping creates a mapping from glyph ID to character by comparing glyph images
 func (e *WFMFileExporter) buildGlyphMapping(glyphsDir, fontDir string) (map[uint16]string, error) {
 	mapping := make(map[uint16]string)
-	
+
 	// Check if font directory exists
 	if _, err := os.Stat(fontDir); os.IsNotExist(err) {
 		return nil, fmt.Errorf("font directory '%s' does not exist", fontDir)
@@ -247,11 +336,11 @@ func (e *WFMFileExporter) buildGlyphMapping(glyphsDir, fontDir string) (map[uint
 		if err != nil {
 			continue // Skip files that can't be processed
 		}
-		
+
 		// Extract character from filename (remove .png extension)
 		baseName := filepath.Base(fontFile)
 		fileName := strings.TrimSuffix(baseName, ".png")
-		
+
 		// Convert hexadecimal Unicode code to character
 		var charName string
 		if unicodeCode, err := strconv.ParseInt(fileName, 16, 32); err == nil {
@@ -261,7 +350,7 @@ func (e *WFMFileExporter) buildGlyphMapping(glyphsDir, fontDir string) (map[uint
 			// Fallback to filename if not a valid hex code
 			charName = fileName
 		}
-		
+
 		fontHashes[hash] = charName
 	}
 
@@ -311,7 +400,7 @@ func (e *WFMFileExporter) calculateImageHash(imagePath string) (string, error) {
 	// Calculate hash based on image content
 	hasher := sha256.New()
 	bounds := img.Bounds()
-	
+
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			r, g, b, a := img.At(x, y).RGBA()
