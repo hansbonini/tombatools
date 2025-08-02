@@ -1031,7 +1031,7 @@ func (e *WFMFileEncoder) loadSingleGlyph(char rune, fontHeight int, fontClut uin
 
 	// Convert to 4bpp linear little endian using PSX tile processor
 	processor := psx.NewPSXTileProcessor()
-	
+
 	// Get appropriate palette based on font height
 	var palette psx.PSXPalette
 	if fontHeight == 24 {
@@ -1039,7 +1039,7 @@ func (e *WFMFileEncoder) loadSingleGlyph(char rune, fontHeight int, fontClut uin
 	} else {
 		palette = psx.NewPSXPalette(DialogueClut)
 	}
-	
+
 	tile, err := processor.ConvertTo4bppLinearLE(img, palette)
 	if err != nil {
 		return Glyph{}, common.FormatError(common.ErrFailedToConvertTo4bpp, err)
@@ -1050,7 +1050,7 @@ func (e *WFMFileEncoder) loadSingleGlyph(char rune, fontHeight int, fontClut uin
 		GlyphClut:       fontClut,
 		GlyphHeight:     uint16(bounds.Dy()),
 		GlyphWidth:      uint16(bounds.Dx()),
-		GlyphHandakuten: 0, // TODO: implementar se necessário
+		GlyphHandakuten: 0,         // TODO: implementar se necessário
 		GlyphImage:      tile.Data, // Use tile data from PSX processor
 	}
 

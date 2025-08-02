@@ -6,10 +6,19 @@ import (
 	"io"
 )
 
-// ValidateWFMHeader checks if the given bytes represent a valid WFM3 header
-func ValidateWFMHeader(magic [4]byte) error {
-	if string(magic[:]) != "WFM3" {
-		return fmt.Errorf("invalid WFM header: expected 'WFM3', got '%s'", string(magic[:]))
+const (
+	WFMFileMagic = "WFM3" // Magic string for WFM files
+)
+
+// IsValidWFMFile checks if the file has a valid WFM header
+func IsValidWFMFile(reader io.Reader) error {
+	magic := make([]byte, 4)
+	_, err := reader.Read(magic)
+	if err != nil {
+		return fmt.Errorf("failed to read WFM header: %w", err)
+	}
+	if string(magic[:]) != WFMFileMagic {
+		return fmt.Errorf("invalid WFM header: expected '%s', got '%s'", WFMFileMagic, string(magic[:]))
 	}
 	return nil
 }

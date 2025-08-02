@@ -71,8 +71,8 @@ func (d *WFMFileDecoder) DecodeHeader(reader io.Reader) (*WFMHeader, error) {
 	}
 
 	// Validate magic header
-	if string(header.Magic[:]) != "WFM3" {
-		return nil, fmt.Errorf("invalid magic header: expected 'WFM3', got '%s'", string(header.Magic[:]))
+	if string(header.Magic[:]) != common.WFMFileMagic {
+		return nil, fmt.Errorf("invalid magic header: expected '%s', got '%s'", common.WFMFileMagic, string(header.Magic[:]))
 	}
 
 	// Read padding

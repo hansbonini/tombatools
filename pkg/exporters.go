@@ -302,9 +302,9 @@ func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs 
 				} else {
 					// Special handling for special commands
 					if glyphID == C04D {
-						currentText += "▼"
+						currentText += TriangleDown
 					} else if glyphID == C04E {
-						currentText += "⏷"
+						currentText += TriangleRight
 					} else {
 						currentText += fmt.Sprintf("[%04X]", glyphID)
 					}
@@ -312,9 +312,9 @@ func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs 
 			} else {
 				// Special handling for special commands
 				if glyphID == C04D {
-					currentText += "▼"
+					currentText += TriangleDown
 				} else if glyphID == C04E {
-					currentText += "⏷"
+					currentText += TriangleRight
 				} else {
 					currentText += fmt.Sprintf("[%04X]", glyphID)
 				}

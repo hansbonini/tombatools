@@ -17,78 +17,78 @@ func TestDialogueContentItem_Interface(t *testing.T) {
 
 func TestBoxContent(t *testing.T) {
 	box := BoxContent{Width: 100, Height: 50}
-	
+
 	if box.Width != 100 {
 		t.Errorf("BoxContent.Width = %d, want 100", box.Width)
 	}
-	
+
 	if box.Height != 50 {
 		t.Errorf("BoxContent.Height = %d, want 50", box.Height)
 	}
-	
+
 	// Test interface implementation
 	box.isDialogueContentItem()
 }
 
 func TestTailContent(t *testing.T) {
 	tail := TailContent{Width: 80, Height: 40}
-	
+
 	if tail.Width != 80 {
 		t.Errorf("TailContent.Width = %d, want 80", tail.Width)
 	}
-	
+
 	if tail.Height != 40 {
 		t.Errorf("TailContent.Height = %d, want 40", tail.Height)
 	}
-	
+
 	// Test interface implementation
 	tail.isDialogueContentItem()
 }
 
 func TestF6Content(t *testing.T) {
 	f6 := F6Content{Width: 120, Height: 60}
-	
+
 	if f6.Width != 120 {
 		t.Errorf("F6Content.Width = %d, want 120", f6.Width)
 	}
-	
+
 	if f6.Height != 60 {
 		t.Errorf("F6Content.Height = %d, want 60", f6.Height)
 	}
-	
+
 	// Test interface implementation
 	f6.isDialogueContentItem()
 }
 
 func TestColorContent(t *testing.T) {
 	color := ColorContent{Value: 5}
-	
+
 	if color.Value != 5 {
 		t.Errorf("ColorContent.Value = %d, want 5", color.Value)
 	}
-	
+
 	// Test interface implementation
 	color.isDialogueContentItem()
 }
 
 func TestPauseContent(t *testing.T) {
 	pause := PauseContent{Duration: 1000}
-	
+
 	if pause.Duration != 1000 {
 		t.Errorf("PauseContent.Duration = %d, want 1000", pause.Duration)
 	}
-	
+
 	// Test interface implementation
 	pause.isDialogueContentItem()
 }
 
 func TestTextContent(t *testing.T) {
 	text := TextContent{Text: "Hello World"}
-	
+
 	if text.Text != "Hello World" {
 		t.Errorf("TextContent.Text = %q, want %q", text.Text, "Hello World")
 	}
-	
+
 	// Test interface implementation
 	text.isDialogueContentItem()
 }
@@ -103,27 +103,27 @@ func TestDialogueEntry(t *testing.T) {
 		Special:    false,
 		Content:    []map[string]interface{}{},
 	}
-	
+
 	if dialogue.ID != 1 {
 		t.Errorf("DialogueEntry.ID = %d, want 1", dialogue.ID)
 	}
-	
+
 	if dialogue.Type != "dialogue" {
 		t.Errorf("DialogueEntry.Type = %q, want %q", dialogue.Type, "dialogue")
 	}
-	
+
 	if dialogue.FontHeight != 16 {
 		t.Errorf("DialogueEntry.FontHeight = %d, want 16", dialogue.FontHeight)
 	}
-	
+
 	if dialogue.FontClut != 0x1234 {
 		t.Errorf("DialogueEntry.FontClut = 0x%04X, want 0x1234", dialogue.FontClut)
 	}
-	
+
 	if dialogue.Terminator != 0xFFFE {
 		t.Errorf("DialogueEntry.Terminator = 0x%04X, want 0xFFFE", dialogue.Terminator)
 	}
-	
+
 	if dialogue.Special != false {
 		t.Errorf("DialogueEntry.Special = %t, want false", dialogue.Special)
 	}
@@ -137,20 +137,20 @@ func TestWFMHeader(t *testing.T) {
 		TotalDialogues:       50,
 		TotalGlyphs:          200,
 	}
-	
+
 	expectedMagic := [4]byte{'W', 'F', 'M', '3'}
 	if header.Magic != expectedMagic {
 		t.Errorf("WFMHeader.Magic = %v, want %v", header.Magic, expectedMagic)
 	}
-	
+
 	if header.DialoguePointerTable != 0x1000 {
 		t.Errorf("WFMHeader.DialoguePointerTable = 0x%X, want 0x1000", header.DialoguePointerTable)
 	}
-	
+
 	if header.TotalDialogues != 50 {
 		t.Errorf("WFMHeader.TotalDialogues = %d, want 50", header.TotalDialogues)
 	}
-	
+
 	if header.TotalGlyphs != 200 {
 		t.Errorf("WFMHeader.TotalGlyphs = %d, want 200", header.TotalGlyphs)
 	}
@@ -165,27 +165,27 @@ func TestGlyph(t *testing.T) {
 		GlyphHandakuten: 0,
 		GlyphImage:      imageData,
 	}
-	
+
 	if glyph.GlyphClut != 0xABCD {
 		t.Errorf("Glyph.GlyphClut = 0x%04X, want 0xABCD", glyph.GlyphClut)
 	}
-	
+
 	if glyph.GlyphHeight != 16 {
 		t.Errorf("Glyph.GlyphHeight = %d, want 16", glyph.GlyphHeight)
 	}
-	
+
 	if glyph.GlyphWidth != 8 {
 		t.Errorf("Glyph.GlyphWidth = %d, want 8", glyph.GlyphWidth)
 	}
-	
+
 	if glyph.GlyphHandakuten != 0 {
 		t.Errorf("Glyph.GlyphHandakuten = %d, want 0", glyph.GlyphHandakuten)
 	}
-	
+
 	if len(glyph.GlyphImage) != 4 {
 		t.Errorf("len(Glyph.GlyphImage) = %d, want 4", len(glyph.GlyphImage))
 	}
-	
+
 	// Check image data content
 	for i, expected := range imageData {
 		if glyph.GlyphImage[i] != expected {
@@ -197,11 +197,11 @@ func TestGlyph(t *testing.T) {
 func TestDialogue(t *testing.T) {
 	dialogueData := []byte{0xFF, 0xFA, 0x00, 0x10, 0x00, 0x08}
 	dialogue := Dialogue{Data: dialogueData}
-	
+
 	if len(dialogue.Data) != 6 {
 		t.Errorf("len(Dialogue.Data) = %d, want 6", len(dialogue.Data))
 	}
-	
+
 	// Check dialogue data content
 	for i, expected := range dialogueData {
 		if dialogue.Data[i] != expected {
@@ -216,20 +216,20 @@ func TestWFMFile(t *testing.T) {
 		TotalDialogues: 2,
 		TotalGlyphs:    3,
 	}
-	
+
 	glyphPointers := []uint16{0x1000, 0x2000, 0x3000}
 	glyphs := []Glyph{
 		{GlyphWidth: 8, GlyphHeight: 16},
 		{GlyphWidth: 12, GlyphHeight: 16},
 		{GlyphWidth: 10, GlyphHeight: 16},
 	}
-	
+
 	dialoguePointers := []uint16{0x4000, 0x5000}
 	dialogues := []Dialogue{
 		{Data: []byte{0xFF, 0xFA}},
 		{Data: []byte{0xFF, 0xFB}},
 	}
-	
+
 	wfm := WFMFile{
 		Header:               header,
 		GlyphPointerTable:    glyphPointers,
@@ -238,23 +238,23 @@ func TestWFMFile(t *testing.T) {
 		Dialogues:            dialogues,
 		OriginalSize:         1024,
 	}
-	
+
 	if len(wfm.GlyphPointerTable) != 3 {
 		t.Errorf("len(WFMFile.GlyphPointerTable) = %d, want 3", len(wfm.GlyphPointerTable))
 	}
-	
+
 	if len(wfm.Glyphs) != 3 {
 		t.Errorf("len(WFMFile.Glyphs) = %d, want 3", len(wfm.Glyphs))
 	}
-	
+
 	if len(wfm.DialoguePointerTable) != 2 {
 		t.Errorf("len(WFMFile.DialoguePointerTable) = %d, want 2", len(wfm.DialoguePointerTable))
 	}
-	
+
 	if len(wfm.Dialogues) != 2 {
 		t.Errorf("len(WFMFile.Dialogues) = %d, want 2", len(wfm.Dialogues))
 	}
-	
+
 	if wfm.OriginalSize != 1024 {
 		t.Errorf("WFMFile.OriginalSize = %d, want 1024", wfm.OriginalSize)
 	}
@@ -285,7 +285,7 @@ func TestConstants(t *testing.T) {
 		{"TERMINATOR_2", TERMINATOR_2, 0xFFFF},
 		{"GLYPH_ID_BASE", GLYPH_ID_BASE, 0x8000},
 	}
-	
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.constant != tc.expected {
@@ -300,17 +300,17 @@ func TestDefaultPalettes(t *testing.T) {
 	if len(DialogueClut) != 16 {
 		t.Errorf("len(DialogueClut) = %d, want 16", len(DialogueClut))
 	}
-	
+
 	// Test first color (transparent)
 	if DialogueClut[0] != 0x0000 {
 		t.Errorf("DialogueClut[0] = 0x%04X, want 0x0000", DialogueClut[0])
 	}
-	
+
 	// Test EventClut palette
 	if len(EventClut) != 16 {
 		t.Errorf("len(EventClut) = %d, want 16", len(EventClut))
 	}
-	
+
 	// Test first color
 	if EventClut[0] != 0x01FF {
 		t.Errorf("EventClut[0] = 0x%04X, want 0x01FF", EventClut[0])

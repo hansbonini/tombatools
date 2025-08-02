@@ -10,7 +10,7 @@ import (
 type TileConverter interface {
 	// ConvertTo4bppLinearLE converts an image to 4bpp linear little endian format
 	ConvertTo4bppLinearLE(img image.Image, palette interface{}) (interface{}, error)
-	
+
 	// ConvertFromTile converts a tile to a standard image
 	ConvertFromTile(tile interface{}) (*image.RGBA, error)
 }

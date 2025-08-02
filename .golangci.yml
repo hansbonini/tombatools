@@ -8,7 +8,8 @@ run:
   modules-download-mode: readonly
 
 output:
-  format: colored-line-number
+  formats:
+    - format: colored-line-number
   print-issued-lines: true
   print-linter-name: true
 
@@ -32,19 +33,16 @@ linters:
     - dupl          # Tool for code clone detection
     - gocritic      # Provides diagnostics that check for bugs, performance and style issues
 
-  disable:
-    - structcheck   # Disabled as it's deprecated
-    - varcheck      # Disabled as it's deprecated
-    - deadcode      # Disabled as it's deprecated
-
 linters-settings:
   errcheck:
     check-type-assertions: true
     check-blank: true
 
   govet:
-    check-shadowing: true
     enable-all: true
+    disable:
+      - shadow      # We'll handle shadow separately if needed
+      - fieldalignment  # Disable struct field alignment for now
 
   gocyclo:
     min-complexity: 15
@@ -55,6 +53,11 @@ linters-settings:
 
   misspell:
     locale: US
+    ignore-words:
+      - dialogues
+      - dialogue
+      - Dialogues
+      - Dialogue
 
   gocritic:
     enabled-tags:

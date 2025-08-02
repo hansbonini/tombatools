@@ -50,7 +50,10 @@ Example:
 		outputDir := args[1]
 
 		// Enable verbose mode if requested
-		verbose, _ := cmd.Flags().GetBool("verbose")
+		verbose, err := cmd.Flags().GetBool("verbose")
+		if err != nil {
+			return fmt.Errorf("error getting verbose flag: %w", err)
+		}
 		common.SetVerboseMode(verbose)
 
 		// Create WFM processor for handling decode operations
@@ -96,7 +99,10 @@ Example:
 		outputFile := args[1]
 
 		// Enable verbose mode if requested
-		verbose, _ := cmd.Flags().GetBool("verbose")
+		verbose, err := cmd.Flags().GetBool("verbose")
+		if err != nil {
+			return fmt.Errorf("error getting verbose flag: %w", err)
+		}
 		common.SetVerboseMode(verbose)
 
 		fmt.Printf("Input file: %s\n", inputFile)
