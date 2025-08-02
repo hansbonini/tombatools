@@ -7,9 +7,12 @@
 
 A collection of utilities for extracting and modifying game files from **Tomba!** (Ore no Tomba) for PlayStation.
 
+Currently supports WFM font files and GAM game data files with full extraction, modification, and recreation capabilities.
+
 ## Features
 
 - **WFM Font File Processing**: Extract and modify font glyphs and dialogue text
+- **GAM File Processing**: Extract and compress game data using custom LZ algorithm
 - **4bpp PSX Graphics**: Native support for PlayStation 4bpp linear little endian format
 - **YAML Export/Import**: Human-readable dialogue editing
 - **PNG Glyph Export**: Individual character extraction as PNG images
@@ -74,6 +77,31 @@ tombatools wfm decode -v CFNT999H.WFM ./output/
 tombatools wfm encode -v dialogues.yaml output.WFM
 ```
 
+### GAM Files
+
+GAM files contain compressed game data using a custom LZ compression algorithm.
+
+#### Extract (Unpack)
+Extract and decompress data from a GAM file:
+```bash
+tombatools gam unpack GAME.GAM data.UNGAM
+```
+
+This creates a decompressed `.UNGAM` file containing the raw game data.
+
+#### Create (Pack)
+Compress data back into a GAM file:
+```bash
+tombatools gam pack data.UNGAM GAME_modified.GAM
+```
+
+#### Verbose Output
+Use `-v` flag for detailed compression/decompression information:
+```bash
+tombatools gam unpack -v GAME.GAM data.UNGAM
+tombatools gam pack -v data.UNGAM output.GAM
+```
+
 ## Development
 
 ### Available Make Targets
@@ -111,6 +139,8 @@ This project uses:
 
 ### Example Workflow
 
+#### WFM Files (Fonts and Dialogues)
+
 1. **Extract original WFM file:**
    ```bash
    tombatools wfm decode CFNT999H.WFM ./extracted/
@@ -126,6 +156,22 @@ This project uses:
    tombatools wfm encode extracted/dialogues.yaml CFNT999H_translated.WFM
    ```
 
+#### GAM Files (Game Data)
+
+1. **Extract original GAM file:**
+   ```bash
+   tombatools gam unpack GAME.GAM extracted_data.UNGAM
+   ```
+
+2. **Modify data:**
+   - Edit the extracted `.UNGAM` file with a hex editor or custom tools
+   - Make your desired changes to the game data
+
+3. **Create modified GAM:**
+   ```bash
+   tombatools gam pack extracted_data.UNGAM GAME_modified.GAM
+   ```
+
 ## File Formats
 
 ### WFM Files
@@ -133,6 +179,12 @@ WFM (WFM3) files contain:
 - **Font glyphs**: 4bpp PSX format character graphics
 - **Dialogue data**: Text with control codes for display
 - **Palettes**: Color lookup tables (CLUT) for rendering
+
+### GAM Files
+GAM files contain:
+- **8-byte header**: Magic "GAM" + padding + uncompressed size (little-endian)
+- **Compressed data**: Game data compressed using custom LZ algorithm
+- **LZ compression**: Bitmask-based algorithm with literal bytes and back-references
 
 ### Supported Dialogue Control Codes
 - `[INIT TEXT BOX]` - Initialize dialogue box with dimensions
