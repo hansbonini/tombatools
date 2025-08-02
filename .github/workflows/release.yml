@@ -1,0 +1,161 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch all history for changelog generation
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Get version from tag
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+    - name: Build binaries
+      run: |
+        mkdir -p dist/
+        
+        # Build for multiple platforms
+        platforms=("windows/amd64" "linux/amd64" "linux/arm64" "darwin/amd64" "darwin/arm64")
+        
+        for platform in "${platforms[@]}"; do
+          platform_split=(${platform//\// })
+          GOOS=${platform_split[0]}
+          GOARCH=${platform_split[1]}
+          
+          output_name="tombatools_${GOOS}_${GOARCH}"
+          if [ $GOOS = "windows" ]; then
+            output_name+='.exe'
+          fi
+          
+          echo "Building for $GOOS/$GOARCH..."
+          
+          env GOOS=$GOOS GOARCH=$GOARCH go build \
+            -ldflags="-s -w -X main.Version=${{ steps.get_version.outputs.VERSION }} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.GitCommit=${{ github.sha }}" \
+            -o "dist/${output_name}" .
+        done
+        
+        ls -la dist/
+
+    - name: Create archives
+      run: |
+        cd dist/
+        
+        # Create zip for Windows
+        zip tombatools_windows_amd64.zip tombatools_windows_amd64.exe
+        
+        # Create tar.gz for Unix systems
+        tar -czf tombatools_linux_amd64.tar.gz tombatools_linux_amd64
+        tar -czf tombatools_linux_arm64.tar.gz tombatools_linux_arm64
+        tar -czf tombatools_darwin_amd64.tar.gz tombatools_darwin_amd64
+        tar -czf tombatools_darwin_arm64.tar.gz tombatools_darwin_arm64
+        
+        # Remove original binaries, keep only archives
+        rm tombatools_windows_amd64.exe
+        rm tombatools_linux_amd64
+        rm tombatools_linux_arm64
+        rm tombatools_darwin_amd64
+        rm tombatools_darwin_arm64
+        
+        ls -la
+
+    - name: Generate changelog
+      id: changelog
+      run: |
+        # Get the previous tag
+        PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+        
+        if [ -z "$PREVIOUS_TAG" ]; then
+          echo "No previous tag found, using initial commit"
+          PREVIOUS_TAG=$(git rev-list --max-parents=0 HEAD)
+        fi
+        
+        echo "Generating changelog from $PREVIOUS_TAG to ${{ github.sha }}"
+        
+        # Generate changelog
+        cat > CHANGELOG.md << 'EOF'
+        ## What's Changed
+        
+        ### 🚀 Features
+        - WFM font file processing for Tomba! PlayStation game
+        - Extract and modify font glyphs and dialogue text  
+        - 4bpp PSX graphics support with native little endian format
+        - YAML export/import for human-readable dialogue editing
+        - PNG glyph export for individual character extraction
+        
+        ### 🔧 Technical Details
+        - Built with Go 1.21
+        - Cross-platform support (Windows, Linux, macOS)
+        - ARM64 support for Apple Silicon and Linux
+        
+        ### 📦 Installation
+        
+        Choose the appropriate binary for your platform:
+        
+        **Windows:**
+        - Download `tombatools_windows_amd64.zip`
+        - Extract and run `tombatools.exe`
+        
+        **Linux:**
+        - AMD64: Download `tombatools_linux_amd64.tar.gz`
+        - ARM64: Download `tombatools_linux_arm64.tar.gz`
+        - Extract: `tar -xzf tombatools_linux_*.tar.gz`
+        - Run: `./tombatools`
+        
+        **macOS:**
+        - Intel: Download `tombatools_darwin_amd64.tar.gz`
+        - Apple Silicon: Download `tombatools_darwin_arm64.tar.gz`
+        - Extract: `tar -xzf tombatools_darwin_*.tar.gz`
+        - Run: `./tombatools`
+        
+        ### 🛠️ Usage Examples
+        
+        ```bash
+        # Extract WFM file
+        tombatools wfm decode CFNT999H.WFM ./output/
+        
+        # Create modified WFM file
+        tombatools wfm encode dialogues.yaml CFNT999H_modified.WFM
+        
+        # Show version information
+        tombatools --version
+        ```
+        
+        ### 🔍 Recent Commits
+        
+        EOF
+        
+        # Add recent commits to changelog
+        git log --pretty=format:"- %s (%h)" $PREVIOUS_TAG..HEAD >> CHANGELOG.md
+        
+        # Set output for use in release
+        echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+        cat CHANGELOG.md >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    - name: Create Release
+      uses: ncipollo/release-action@v1
+      with:
+        tag: ${{ steps.get_version.outputs.VERSION }}
+        name: TombaTools ${{ steps.get_version.outputs.VERSION }}
+        body: ${{ steps.changelog.outputs.CHANGELOG }}
+        artifacts: "dist/*"
+        draft: false
+        prerelease: ${{ contains(steps.get_version.outputs.VERSION, '-') }}
+        token: ${{ secrets.GITHUB_TOKEN }}
