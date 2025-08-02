@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/hansbonini/tombatools/pkg/common"
+	"github.com/hansbonini/tombatools/pkg/psx"
 	"gopkg.in/yaml.v3"
 )
 
@@ -64,17 +65,17 @@ func (e *WFMFileExporter) ExportGlyphs(wfm *WFMFile, outputDir string) error {
 		height := int(glyph.GlyphHeight)
 
 		// Select the correct palette based on GlyphHeight
-		var palette common.PSXPalette
+		var palette psx.PSXPalette
 		if glyph.GlyphHeight == 24 {
 			// Use EventClut for glyphs with height 24
-			palette = common.NewPSXPalette(EventClut)
+			palette = psx.NewPSXPalette(EventClut)
 		} else {
 			// Use DialogueClut for all other heights
-			palette = common.NewPSXPalette(DialogueClut)
+			palette = psx.NewPSXPalette(DialogueClut)
 		}
 
 		// Create PSX tile from glyph data
-		tile := &common.PSXTile{
+		tile := &psx.PSXTile{
 			Width:   width,
 			Height:  height,
 			Data:    glyph.GlyphImage,
@@ -82,7 +83,7 @@ func (e *WFMFileExporter) ExportGlyphs(wfm *WFMFile, outputDir string) error {
 		}
 
 		// Convert tile to image using PSX tile processor
-		processor := common.NewPSXTileProcessor()
+		processor := psx.NewPSXTileProcessor()
 		glyphImg, err := processor.ConvertFromTile(tile)
 		if err != nil {
 			common.LogWarn("Failed to convert glyph %d to image: %v", glyphIndex, err)

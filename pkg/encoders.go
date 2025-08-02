@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/hansbonini/tombatools/pkg/common"
+	"github.com/hansbonini/tombatools/pkg/psx"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1029,14 +1030,14 @@ func (e *WFMFileEncoder) loadSingleGlyph(char rune, fontHeight int, fontClut uin
 	}
 
 	// Convert to 4bpp linear little endian using PSX tile processor
-	processor := common.NewPSXTileProcessor()
+	processor := psx.NewPSXTileProcessor()
 	
 	// Get appropriate palette based on font height
-	var palette common.PSXPalette
+	var palette psx.PSXPalette
 	if fontHeight == 24 {
-		palette = common.NewPSXPalette(EventClut)
+		palette = psx.NewPSXPalette(EventClut)
 	} else {
-		palette = common.NewPSXPalette(DialogueClut)
+		palette = psx.NewPSXPalette(DialogueClut)
 	}
 	
 	tile, err := processor.ConvertTo4bppLinearLE(img, palette)
