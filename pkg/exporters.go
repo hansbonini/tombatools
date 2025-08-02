@@ -7,8 +7,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"image"
-	"image/color"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -51,16 +49,7 @@ func (e *WFMFileExporter) ExportGlyphs(wfm *WFMFile, outputDir string) error {
 		return fmt.Errorf("glyph count mismatch: expected %d, got %d", expectedGlyphs, actualGlyphs)
 	}
 
-	// Function to convert PSX 16-bit color to RGBA
-	psxToRGBA := func(psxColor uint16) color.RGBA {
-		if psxColor == 0 {
-			return color.RGBA{0, 0, 0, 0} // Transparent for color 0
-		}
-		r := uint8((psxColor & 0x1F) << 3)         // Red: bits 0-4
-		g := uint8(((psxColor >> 5) & 0x1F) << 3)  // Green: bits 5-9
-		b := uint8(((psxColor >> 10) & 0x1F) << 3) // Blue: bits 10-14
-		return color.RGBA{r, g, b, 255}
-	}
+	// Process each glyph and export as PNG
 
 	// Process each glyph individually
 	exportedCount := 0
@@ -75,42 +64,29 @@ func (e *WFMFileExporter) ExportGlyphs(wfm *WFMFile, outputDir string) error {
 		height := int(glyph.GlyphHeight)
 
 		// Select the correct palette based on GlyphHeight
-		var currentPalette [16]uint16
+		var palette common.PSXPalette
 		if glyph.GlyphHeight == 24 {
 			// Use EventClut for glyphs with height 24
-			currentPalette = EventClut
+			palette = common.NewPSXPalette(EventClut)
 		} else {
 			// Use DialogueClut for all other heights
-			currentPalette = DialogueClut
+			palette = common.NewPSXPalette(DialogueClut)
 		}
 
-		// Create individual image for this glyph
-		glyphImg := image.NewRGBA(image.Rect(0, 0, width, height))
+		// Create PSX tile from glyph data
+		tile := &common.PSXTile{
+			Width:   width,
+			Height:  height,
+			Data:    glyph.GlyphImage,
+			Palette: palette,
+		}
 
-		// Process 4bpp data
-		pixelIndex := 0
-		for y := 0; y < height; y++ {
-			for x := 0; x < width; x++ {
-				byteIndex := pixelIndex / 2
-				if byteIndex >= len(glyph.GlyphImage) {
-					break
-				}
-
-				var pixelValue uint8
-				if pixelIndex%2 == 0 {
-					// Even pixel: lower 4 bits (little endian)
-					pixelValue = glyph.GlyphImage[byteIndex] & 0x0F
-				} else {
-					// Odd pixel: upper 4 bits (little endian)
-					pixelValue = (glyph.GlyphImage[byteIndex] & 0xF0) >> 4
-				}
-
-				// Convert PSX color to RGBA
-				psxColor := currentPalette[pixelValue]
-				finalColor := psxToRGBA(psxColor)
-				glyphImg.Set(x, y, finalColor)
-				pixelIndex++
-			}
+		// Convert tile to image using PSX tile processor
+		processor := common.NewPSXTileProcessor()
+		glyphImg, err := processor.ConvertFromTile(tile)
+		if err != nil {
+			common.LogWarn("Failed to convert glyph %d to image: %v", glyphIndex, err)
+			continue
 		}
 
 		// Save individual PNG file

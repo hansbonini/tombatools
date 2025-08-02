@@ -1028,8 +1028,18 @@ func (e *WFMFileEncoder) loadSingleGlyph(char rune, fontHeight int, fontClut uin
 		return Glyph{}, common.FormatErrorString(common.ErrFailedToLoadPNG, "%s: %w", glyphPath, err)
 	}
 
-	// Converter para 4bpp linear little endian
-	imageData, err := e.convertTo4bppLinearLE(img, fontHeight)
+	// Convert to 4bpp linear little endian using PSX tile processor
+	processor := common.NewPSXTileProcessor()
+	
+	// Get appropriate palette based on font height
+	var palette common.PSXPalette
+	if fontHeight == 24 {
+		palette = common.NewPSXPalette(EventClut)
+	} else {
+		palette = common.NewPSXPalette(DialogueClut)
+	}
+	
+	tile, err := processor.ConvertTo4bppLinearLE(img, palette)
 	if err != nil {
 		return Glyph{}, common.FormatError(common.ErrFailedToConvertTo4bpp, err)
 	}
@@ -1040,7 +1050,7 @@ func (e *WFMFileEncoder) loadSingleGlyph(char rune, fontHeight int, fontClut uin
 		GlyphHeight:     uint16(bounds.Dy()),
 		GlyphWidth:      uint16(bounds.Dx()),
 		GlyphHandakuten: 0, // TODO: implementar se necessário
-		GlyphImage:      imageData,
+		GlyphImage:      tile.Data, // Use tile data from PSX processor
 	}
 
 	return glyph, nil
@@ -1091,102 +1101,6 @@ func (e *WFMFileEncoder) loadPNGImage(path string) (image.Image, error) {
 	}
 
 	return img, nil
-}
-
-// convertTo4bppLinearLE converts an image to 4bpp linear little endian format using proper CLUT palette mapping
-func (e *WFMFileEncoder) convertTo4bppLinearLE(img image.Image, fontHeight int) ([]byte, error) {
-	bounds := img.Bounds()
-	width := bounds.Dx()
-	height := bounds.Dy()
-
-	// Cada pixel usa 4 bits, então 2 pixels por byte
-	// Se a largura for ímpar, precisamos adicionar padding
-	bytesPerRow := (width + 1) / 2
-	totalBytes := bytesPerRow * height
-
-	data := make([]byte, totalBytes)
-
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x += 2 {
-			byteIndex := y*bytesPerRow + x/2
-
-			// Primeiro pixel (4 bits baixos)
-			pixel1 := e.getPixelIntensity(img, bounds.Min.X+x, bounds.Min.Y+y, fontHeight)
-
-			// Segundo pixel (4 bits altos), se existir
-			var pixel2 uint8
-			if x+1 < width {
-				pixel2 = e.getPixelIntensity(img, bounds.Min.X+x+1, bounds.Min.Y+y, fontHeight)
-			}
-
-			// Combinar os dois pixels em um byte (little endian: pixel1 nos bits baixos)
-			data[byteIndex] = pixel1 | (pixel2 << 4)
-		}
-	}
-
-	return data, nil
-}
-
-// getPixelIntensity gets the 4-bit palette index value of a pixel by matching RGB colors to CLUT palette
-func (e *WFMFileEncoder) getPixelIntensity(img image.Image, x, y int, fontHeight int) uint8 {
-	r, g, b, a := img.At(x, y).RGBA()
-
-	// Se o pixel for transparente, retornar 0
-	if a == 0 {
-		return 0
-	}
-
-	// Converter de 16-bit para 8-bit RGB
-	r8 := uint8(r >> 8)
-	g8 := uint8(g >> 8)
-	b8 := uint8(b >> 8)
-
-	// Selecionar a paleta correta baseada na altura da fonte
-	var currentPalette [16]uint16
-	if fontHeight == 24 {
-		// Use EventClut para altura 24
-		currentPalette = EventClut
-	} else {
-		// Use DialogueClut para outras alturas
-		currentPalette = DialogueClut
-	}
-
-	// Função para converter cor PSX 16-bit para RGB 8-bit
-	psxToRGB := func(psxColor uint16) (uint8, uint8, uint8) {
-		if psxColor == 0 {
-			return 0, 0, 0 // Cor 0 é transparente/preta
-		}
-		r := uint8((psxColor & 0x1F) << 3)         // Red: bits 0-4
-		g := uint8(((psxColor >> 5) & 0x1F) << 3)  // Green: bits 5-9
-		b := uint8(((psxColor >> 10) & 0x1F) << 3) // Blue: bits 10-14
-		return r, g, b
-	}
-
-	// Procurar a cor mais próxima na paleta
-	bestMatch := uint8(0)
-	minDistance := uint32(0xFFFFFFFF)
-
-	for i, psxColor := range currentPalette {
-		pr, pg, pb := psxToRGB(psxColor)
-
-		// Calcular distância euclidiana no espaço RGB
-		dr := int32(r8) - int32(pr)
-		dg := int32(g8) - int32(pg)
-		db := int32(b8) - int32(pb)
-		distance := uint32(dr*dr + dg*dg + db*db)
-
-		if distance < minDistance {
-			minDistance = distance
-			bestMatch = uint8(i)
-		}
-
-		// Se encontrou uma correspondência exata, parar
-		if distance == 0 {
-			break
-		}
-	}
-
-	return bestMatch
 }
 
 // NewWFMEncoder creates a new WFM encoder instance
