@@ -125,30 +125,32 @@ func (e *WFMFileExporter) ExportGlyphs(wfm *WFMFile, outputDir string) error {
 	return nil
 }
 
-// DialogueEntry represents a single dialogue with decoded text
-type DialogueEntry struct {
-	ID         int    `yaml:"id"`
-	Type       string `yaml:"type"`
-	BoxWidth   *int   `yaml:"box_width,omitempty"`
-	BoxHeight  *int   `yaml:"box_height,omitempty"`
-	FontHeight int    `yaml:"font_height"`
-	FontClut   uint16 `yaml:"font_clut"`
-	Text       string `yaml:"text"`
-}
-
 // DialoguesYAML represents the complete dialogues structure for YAML export
 type DialoguesYAML struct {
 	TotalDialogues int             `yaml:"total_dialogues"`
+	OriginalSize   int64           `yaml:"original_size"`
 	Dialogues      []DialogueEntry `yaml:"dialogues"`
 }
 
-// processDialogueText processes dialogue text, extracting box dimensions and cleaning control codes
-func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs []Glyph) (text string, dialogueType string, boxWidth *int, boxHeight *int, fontHeight int, fontClut uint16) {
-	decodedText := ""
-	var width, height *int
-	entryType := "event"    // Default to event type
-	detectedFontHeight := 8 // Default to 8, will be updated when we find actual glyphs
+// processDialogueText processes dialogue text using the new content-based structure
+func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs []Glyph) ([]map[string]interface{}, string, int, uint16, uint16) {
+	var content []map[string]interface{}
+	var currentText string
+	entryType := "event"          // Default to event type
+	detectedFontHeight := 8       // Default to 8, will be updated when we find actual glyphs
 	detectedFontClut := uint16(0) // Default CLUT
+
+	// Function to add current text to content if it exists
+	addTextContent := func() {
+		if currentText != "" {
+			content = append(content, map[string]interface{}{
+				"text": currentText,
+			})
+			currentText = ""
+		}
+	}
+
+	var terminator uint16 = 0xFFFF // Default terminator
 
 	// Process dialogue data in 2-byte chunks
 	for i := 0; i+1 < len(rawData); i += 2 {
@@ -156,7 +158,8 @@ func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs 
 		glyphID := binary.LittleEndian.Uint16(rawData[i : i+2])
 
 		// Check for termination
-		if glyphID == 0xFFFF {
+		if glyphID == 0xFFFF || glyphID == 0xFFFE {
+			terminator = glyphID
 			break
 		}
 
@@ -165,17 +168,121 @@ func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs 
 			entryType = "dialogue" // Set type to dialogue when INIT TEXT BOX is found
 			// Next 2 bytes are width
 			if i+4 <= len(rawData) {
-				w := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
-				width = &w
-				i += 2 // Skip width bytes
+				width := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
+				// Next 2 bytes are height
+				if i+6 <= len(rawData) {
+					height := int(binary.LittleEndian.Uint16(rawData[i+4 : i+6]))
+					content = append(content, map[string]interface{}{
+						"box": map[string]interface{}{
+							"width":  width,
+							"height": height,
+						},
+					})
+					i += 4 // Skip both width and height bytes
+				} else {
+					i += 2 // Skip only width bytes
+				}
 			}
-			// Next 2 bytes are height
+			continue
+		}
+
+		// Handle INIT_TAIL with width and height parameters
+		if glyphID == INIT_TAIL {
+			// Add current text before adding tail
+			addTextContent()
+			// Next 2 bytes are width
 			if i+4 <= len(rawData) {
-				h := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
-				height = &h
-				i += 2 // Skip height bytes
+				width := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
+				// Next 2 bytes are height
+				if i+6 <= len(rawData) {
+					height := int(binary.LittleEndian.Uint16(rawData[i+4 : i+6]))
+					content = append(content, map[string]interface{}{
+						"tail": map[string]interface{}{
+							"width":  width,
+							"height": height,
+						},
+					})
+					i += 4 // Skip both width and height bytes
+				} else {
+					i += 2 // Skip only width bytes
+				}
 			}
-			continue // Don't add [INIT TEXT BOX] to text
+			continue
+		}
+
+		// Handle F6 command with width and height parameters
+		if glyphID == F6 {
+			// Add current text before adding f6
+			addTextContent()
+			// Next 2 bytes are width
+			if i+4 <= len(rawData) {
+				width := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
+				// Next 2 bytes are height
+				if i+6 <= len(rawData) {
+					height := int(binary.LittleEndian.Uint16(rawData[i+4 : i+6]))
+					content = append(content, map[string]interface{}{
+						"f6": map[string]interface{}{
+							"width":  width,
+							"height": height,
+						},
+					})
+					i += 4 // Skip both width and height bytes
+				} else {
+					i += 2 // Skip only width bytes
+				}
+			}
+			continue
+		}
+
+		// Handle CHANGE_COLOR_TO
+		if glyphID == CHANGE_COLOR_TO {
+			// Add current text before changing color
+			addTextContent()
+			// Next 2 bytes are color value
+			if i+4 <= len(rawData) {
+				colorValue := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
+				content = append(content, map[string]interface{}{
+					"color": map[string]interface{}{
+						"value": colorValue,
+					},
+				})
+				i += 2 // Skip color value bytes
+			}
+			continue
+		}
+
+		// Handle PAUSE_FOR
+		if glyphID == PAUSE_FOR {
+			// Add current text before adding pause
+			addTextContent()
+			// Next 2 bytes are duration
+			if i+4 <= len(rawData) {
+				duration := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
+				content = append(content, map[string]interface{}{
+					"pause": map[string]interface{}{
+						"duration": duration,
+					},
+				})
+				i += 2 // Skip duration bytes
+			}
+			continue
+		}
+
+		// Handle FFF2 command with single parameter
+		if glyphID == FFF2 {
+			// Add current text before adding fff2
+			addTextContent()
+			// Next 2 bytes are parameter value
+			if i+4 <= len(rawData) {
+				paramValue := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
+				content = append(content, map[string]interface{}{
+					"fff2": map[string]interface{}{
+						"value": paramValue,
+					},
+				})
+				i += 2 // Skip parameter value bytes
+			}
+			continue
 		}
 
 		// Handle Termination markers
@@ -202,26 +309,58 @@ func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs 
 			// Try to decode character
 			if glyphMapping != nil {
 				if char, found := glyphMapping[actualGlyphID]; found {
-					decodedText += char
+					currentText += char
 				} else {
-					decodedText += fmt.Sprintf("[%04X]", glyphID)
+					// Special handling for special commands
+					if glyphID == C04D {
+						currentText += "▼"
+					} else if glyphID == C04E {
+						currentText += "⏷"
+					} else {
+						currentText += fmt.Sprintf("[%04X]", glyphID)
+					}
 				}
 			} else {
-				decodedText += fmt.Sprintf("[%04X]", glyphID)
+				// Special handling for special commands
+				if glyphID == C04D {
+					currentText += "▼"
+				} else if glyphID == C04E {
+					currentText += "⏷"
+				} else {
+					currentText += fmt.Sprintf("[%04X]", glyphID)
+				}
 			}
 		} else {
 			// Handle special control codes
-			specialCode := getSpecialCharacterCode(glyphID)
-			decodedText += specialCode
+			switch glyphID {
+			case C04D:
+				currentText += "▼" // Unicode down-pointing triangle for C04D
+			case C04E:
+				currentText += "⏷" // Unicode down-pointing triangle for C04E
+			case WAIT_FOR_INPUT:
+				currentText += "⧗" // Unicode hourglass for WAIT_FOR_INPUT
+			case NEWLINE:
+				currentText += "\n"
+			case DOUBLE_NEWLINE:
+				currentText += "\n\n"
+			default:
+				specialCode := getSpecialCharacterCode(glyphID)
+				currentText += specialCode
+			}
 		}
 	}
 
-	return decodedText, entryType, width, height, detectedFontHeight, detectedFontClut
+	// Add any remaining text
+	addTextContent()
+
+	return content, entryType, detectedFontHeight, detectedFontClut, terminator
 }
 
 // getSpecialCharacterCode returns the formatted string for special control codes
 func getSpecialCharacterCode(code uint16) string {
 	switch code {
+	case FFF2:
+		return "[FFF2]" // args: 1
 	case HALT:
 		return "[HALT]"
 	case F4:
@@ -238,6 +377,10 @@ func getSpecialCharacterCode(code uint16) string {
 		return "[PAUSE FOR]" // args: 1
 	case DOUBLE_NEWLINE:
 		return "\n\n"
+	case C04D:
+		return "[C04D]"
+	case C04E:
+		return "[C04E]"
 	case WAIT_FOR_INPUT:
 		return "[WAIT FOR INPUT]"
 	case NEWLINE:
@@ -268,24 +411,49 @@ func (e *WFMFileExporter) ExportDialogues(wfm *WFMFile, outputDir string) error 
 	// Process each dialogue using data already extracted in DecodeDialogues
 	var dialogueEntries []DialogueEntry
 	for i, dialogue := range wfm.Dialogues {
-		// Process dialogue text and extract box dimensions, font height and CLUT
-		text, dialogueType, boxWidth, boxHeight, fontHeight, fontClut := processDialogueText(dialogue.Data, glyphMapping, wfm.Glyphs)
+		// Process dialogue text using the new content-based structure
+		content, dialogueType, fontHeight, fontClut, terminator := processDialogueText(dialogue.Data, glyphMapping, wfm.Glyphs)
+
+		// Convert terminator from hex value to simple 1 or 2
+		var terminatorValue uint16
+		switch terminator {
+		case 0xFFFE: // TERMINATOR_1
+			terminatorValue = 1
+		case 0xFFFF: // TERMINATOR_2
+			terminatorValue = 2
+		default:
+			terminatorValue = 2 // Default to TERMINATOR_2
+		}
 
 		dialogueEntry := DialogueEntry{
 			ID:         i,
 			Type:       dialogueType,
-			BoxWidth:   boxWidth,
-			BoxHeight:  boxHeight,
 			FontHeight: fontHeight,
 			FontClut:   fontClut,
-			Text:       text,
+			Terminator: terminatorValue,
+			Content:    content,
 		}
 		dialogueEntries = append(dialogueEntries, dialogueEntry)
+	}
+
+	// Detect special dialogues from Reserved section
+	specialDialogueIDs := e.parseSpecialDialogues(wfm.Header.Reserved[:], expectedDialogues)
+
+	// Mark special dialogues in the entries
+	for i := range dialogueEntries {
+		for _, specialID := range specialDialogueIDs {
+			if dialogueEntries[i].ID == specialID {
+				dialogueEntries[i].Special = true
+				fmt.Printf("Marked dialogue %d as special\n", specialID)
+				break
+			}
+		}
 	}
 
 	// Create YAML structure
 	dialoguesYAML := DialoguesYAML{
 		TotalDialogues: expectedDialogues,
+		OriginalSize:   wfm.OriginalSize,
 		Dialogues:      dialogueEntries,
 	}
 
@@ -306,6 +474,75 @@ func (e *WFMFileExporter) ExportDialogues(wfm *WFMFile, outputDir string) error 
 
 	fmt.Printf("Exported %d dialogues to YAML: %s\n", len(dialogueEntries), yamlFile)
 	return nil
+}
+
+// parseSpecialDialogues extracts special dialogue IDs from the Reserved section
+func (e *WFMFileExporter) parseSpecialDialogues(reservedData []byte, totalDialogues int) []int {
+	var specialIDs []int
+
+	// Debug: show first 32 bytes of Reserved section
+	fmt.Printf("Reserved section debug (first 32 bytes): ")
+	for i := 0; i < 32 && i < len(reservedData); i++ {
+		fmt.Printf("%02X ", reservedData[i])
+	}
+	fmt.Printf("\n")
+
+	// Check if all 128 bytes are zero - if so, no special dialogues exist
+	allZero := true
+	for _, b := range reservedData {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+
+	if allZero {
+		fmt.Printf("All Reserved section bytes are zero - no special dialogues in file\n")
+		return specialIDs
+	}
+
+	// Check if first uint16 is 0 but there are non-zero values after it
+	firstID := uint16(reservedData[0]) | (uint16(reservedData[1]) << 8)
+	hasNonZeroAfterFirst := false
+	for i := 2; i < len(reservedData); i++ {
+		if reservedData[i] != 0 {
+			hasNonZeroAfterFirst = true
+			break
+		}
+	}
+
+	// If first ID is 0 and there are non-zero values after, include dialogue 0 as special
+	if firstID == 0 && hasNonZeroAfterFirst {
+		specialIDs = append(specialIDs, 0)
+		fmt.Printf("First ID is 0 with non-zero values after - including dialogue 0 as special\n")
+	}
+
+	// Parse uint16 IDs stored in little endian format
+	for i := 0; i < len(reservedData)-1; i += 2 {
+		// Extract uint16 little endian
+		id := uint16(reservedData[i]) | (uint16(reservedData[i+1]) << 8)
+
+		// Skip zero values but don't stop processing
+		if id == 0 {
+			continue
+		}
+
+		// Only include IDs that are within the valid range for dialogue IDs
+		// IDs should be between 0 and totalDialogues-1
+		if id < uint16(totalDialogues) {
+			specialIDs = append(specialIDs, int(id))
+		} else {
+			fmt.Printf("Warning: Found invalid dialogue ID %d in Reserved section (max valid ID: %d)\n", id, totalDialogues-1)
+		}
+	}
+
+	if len(specialIDs) > 0 {
+		fmt.Printf("Detected special dialogues from Reserved section: %v\n", specialIDs)
+	} else {
+		fmt.Printf("No valid special dialogue IDs found in Reserved section\n")
+	}
+
+	return specialIDs
 }
 
 // buildGlyphMapping creates a mapping from glyph ID to character by comparing glyph images
@@ -441,11 +678,21 @@ func (p *WFMFileProcessor) Process(inputFile string, outputDir string) error {
 	}
 	defer file.Close()
 
+	// Get file size
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to get file info: %w", err)
+	}
+	originalSize := fileInfo.Size()
+
 	// Decode WFM file
 	wfm, err := p.Decode(file)
 	if err != nil {
 		return fmt.Errorf("failed to decode WFM file: %w", err)
 	}
+
+	// Store original size in WFM structure
+	wfm.OriginalSize = originalSize
 
 	// Create output directory
 	if err := os.MkdirAll(outputDir, 0755); err != nil {

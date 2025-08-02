@@ -6,23 +6,28 @@ import "io"
 const (
 	// Text box initialization
 	INIT_TEXT_BOX = 0xFFFA
-	
+
 	// Special control codes
-	HALT              = 0xFFF3
-	F4                = 0xFFF4
-	PROMPT            = 0xFFF5
-	F6                = 0xFFF6 // args: 2
-	CHANGE_COLOR_TO   = 0xFFF7 // args: 1
-	INIT_TAIL         = 0xFFF8 // args: 2
-	PAUSE_FOR         = 0xFFF9 // args: 1
-	DOUBLE_NEWLINE    = 0xFFFB
-	WAIT_FOR_INPUT    = 0xFFFC
-	NEWLINE           = 0xFFFD
-	
+	FFF2            = 0xFFF2 // args: 1
+	HALT            = 0xFFF3
+	F4              = 0xFFF4
+	PROMPT          = 0xFFF5
+	F6              = 0xFFF6 // args: 2
+	CHANGE_COLOR_TO = 0xFFF7 // args: 1
+	INIT_TAIL       = 0xFFF8 // args: 2
+	PAUSE_FOR       = 0xFFF9 // args: 1
+	DOUBLE_NEWLINE  = 0xFFFB
+	WAIT_FOR_INPUT  = 0xFFFC
+	NEWLINE         = 0xFFFD
+
+	// Additional special commands
+	C04D = 0xC04D // Special character
+	C04E = 0xC04E // Special character
+
 	// Termination markers
 	TERMINATOR_1 = 0xFFFE
 	TERMINATOR_2 = 0xFFFF
-	
+
 	// Glyph ID base offset
 	GLYPH_ID_BASE = 0x8000
 )
@@ -40,6 +45,72 @@ var EventClut = [16]uint16{
 	0x2529, 0x56B5, 0x00F0, 0x0198,
 	0x6739, 0x0134, 0x01FF, 0x7C00,
 	0x7C00, 0x7C00, 0x7C00, 0x7C00,
+}
+
+// New dialogue content structures
+type DialogueContentItem interface {
+	isDialogueContentItem()
+}
+
+type BoxContent struct {
+	Width  int `yaml:"width"`
+	Height int `yaml:"height"`
+}
+
+func (b BoxContent) isDialogueContentItem() {}
+
+type TailContent struct {
+	Width  int `yaml:"width"`
+	Height int `yaml:"height"`
+}
+
+func (t TailContent) isDialogueContentItem() {}
+
+type F6Content struct {
+	Width  int `yaml:"width"`
+	Height int `yaml:"height"`
+}
+
+func (f F6Content) isDialogueContentItem() {}
+
+type ColorContent struct {
+	Value int `yaml:"value"`
+}
+
+func (c ColorContent) isDialogueContentItem() {}
+
+type PauseContent struct {
+	Duration int `yaml:"duration"`
+}
+
+func (p PauseContent) isDialogueContentItem() {}
+
+type TextContent struct {
+	Text string `yaml:",inline"`
+}
+
+func (t TextContent) isDialogueContentItem() {}
+
+// DialogueEntry represents a single dialogue with the new structure
+type DialogueEntry struct {
+	ID         int                      `yaml:"id"`
+	Type       string                   `yaml:"type"`
+	FontHeight int                      `yaml:"font_height"`
+	FontClut   uint16                   `yaml:"font_clut"`
+	Terminator uint16                   `yaml:"terminator"`
+	Special    bool                     `yaml:"special,omitempty"`
+	Content    []map[string]interface{} `yaml:"content"`
+}
+
+// Legacy DialogueEntry for backward compatibility during migration
+type LegacyDialogueEntry struct {
+	ID         int    `yaml:"id"`
+	Type       string `yaml:"type"`
+	BoxWidth   *int   `yaml:"box_width,omitempty"`
+	BoxHeight  *int   `yaml:"box_height,omitempty"`
+	FontHeight int    `yaml:"font_height"`
+	FontClut   uint16 `yaml:"font_clut"`
+	Text       string `yaml:"text"`
 }
 
 // WFMHeader represents the main header of a WFM file
@@ -73,6 +144,7 @@ type WFMFile struct {
 	Glyphs               []Glyph
 	DialoguePointerTable []uint16
 	Dialogues            []Dialogue
+	OriginalSize         int64 // Size of the original WFM file in bytes
 }
 
 // WFMDecoder interface defines methods for decoding WFM files

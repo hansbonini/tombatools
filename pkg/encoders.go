@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,7 +16,9 @@ import (
 )
 
 // WFMFileEncoder implements the WFMEncoder interface
-type WFMFileEncoder struct{}
+type WFMFileEncoder struct {
+	originalSize int64 // Store original file size for padding
+}
 
 // GlyphEncodeInfo holds information about a glyph and its assigned encode value
 type GlyphEncodeInfo struct {
@@ -36,7 +39,7 @@ type RecodedDialogue struct {
 // Encode creates a WFM file from a YAML dialogue file and associated glyph directory
 func (e *WFMFileEncoder) Encode(yamlFile string, outputFile string) error {
 	// Load dialogues from YAML
-	dialogues, err := e.LoadDialogues(yamlFile)
+	dialogues, reservedData, err := e.LoadDialogues(yamlFile)
 	if err != nil {
 		return fmt.Errorf("failed to load dialogues: %w", err)
 	}
@@ -112,7 +115,7 @@ func (e *WFMFileEncoder) Encode(yamlFile string, outputFile string) error {
 	fmt.Printf("Total de bytes codificados: %d\n", totalEncodedBytes)
 
 	// Quinto passo: montar o arquivo WFM final
-	wfmFile, err := e.buildWFMFile(glyphMap, encodeValueMap, encodeOrder, recodedDialogues)
+	wfmFile, err := e.buildWFMFile(glyphMap, encodeValueMap, encodeOrder, recodedDialogues, reservedData)
 	if err != nil {
 		return fmt.Errorf("failed to build WFM file: %w", err)
 	}
@@ -131,25 +134,84 @@ func (e *WFMFileEncoder) Encode(yamlFile string, outputFile string) error {
 }
 
 // LoadDialogues loads dialogue entries from YAML file
-func (e *WFMFileEncoder) LoadDialogues(yamlFile string) ([]DialogueEntry, error) {
+func (e *WFMFileEncoder) LoadDialogues(yamlFile string) ([]DialogueEntry, []byte, error) {
 	data, err := os.ReadFile(yamlFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read YAML file: %w", err)
+		return nil, nil, fmt.Errorf("failed to read YAML file: %w", err)
 	}
 
 	var yamlData struct {
 		TotalDialogues int             `yaml:"total_dialogues"`
+		OriginalSize   int64           `yaml:"original_size"`
 		Dialogues      []DialogueEntry `yaml:"dialogues"`
 	}
 
 	if err := yaml.Unmarshal(data, &yamlData); err != nil {
-		return nil, fmt.Errorf("failed to parse YAML: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse YAML: %w", err)
 	}
 
-	return yamlData.Dialogues, nil
+	// Build reserved data based on special dialogues
+	reservedData := e.buildReservedData(yamlData.Dialogues)
+
+	// Store original size for later use in padding
+	e.originalSize = yamlData.OriginalSize
+
+	return yamlData.Dialogues, reservedData, nil
 }
 
-// collectUniqueCharacters collects all unique characters from dialogue texts and returns unmapped bytes
+// buildReservedData constructs the 128-byte Reserved section based on special dialogues
+func (e *WFMFileEncoder) buildReservedData(dialogues []DialogueEntry) []byte {
+	// Create 128-byte reserved section - ALWAYS 128 bytes
+	reservedData := make([]byte, 128)
+
+	// Find all dialogues marked as special
+	var specialDialogueIDs []int
+	for _, dialogue := range dialogues {
+		if dialogue.Special {
+			specialDialogueIDs = append(specialDialogueIDs, dialogue.ID)
+		}
+	}
+
+	// If no special dialogues found, return zero-filled array
+	if len(specialDialogueIDs) == 0 {
+		fmt.Printf("No special dialogues found - Reserved section will be zero-filled (128 bytes)\n")
+		return reservedData
+	}
+
+	// Sort special dialogue IDs to ensure consistent order
+	sort.Ints(specialDialogueIDs)
+
+	// Pack special dialogue IDs into the reserved section
+	// Each ID is stored as uint16 (2 bytes) in little endian format
+	byteIndex := 0
+	maxEntries := 128 / 2 // Maximum 64 entries (128 bytes / 2 bytes per ID)
+
+	for i, id := range specialDialogueIDs {
+		if i >= maxEntries {
+			fmt.Printf("Warning: Too many special dialogues (%d), only first %d will be stored\n", len(specialDialogueIDs), maxEntries)
+			break
+		}
+
+		if byteIndex+1 < len(reservedData) {
+			// Store ID as uint16 little endian
+			reservedData[byteIndex] = byte(id & 0xFF)          // Low byte
+			reservedData[byteIndex+1] = byte((id >> 8) & 0xFF) // High byte
+			byteIndex += 2
+		}
+	}
+
+	fmt.Printf("Special dialogues found: %v\n", specialDialogueIDs)
+	fmt.Printf("Reserved section built with %d special dialogue IDs (128 bytes total)\n", len(specialDialogueIDs))
+
+	// Ensure we always return exactly 128 bytes
+	if len(reservedData) != 128 {
+		panic(fmt.Sprintf("Reserved section must be exactly 128 bytes, got %d", len(reservedData)))
+	}
+
+	return reservedData
+}
+
+// collectUniqueCharacters collects all unique characters from dialogue content and returns unmapped bytes
 func (e *WFMFileEncoder) collectUniqueCharacters(dialogues []DialogueEntry) ([]rune, []string) {
 	charSet := make(map[rune]bool)
 	unmappedSet := make(map[string]bool)
@@ -159,35 +221,46 @@ func (e *WFMFileEncoder) collectUniqueCharacters(dialogues []DialogueEntry) ([]r
 
 	// Lista de tags especiais conhecidas que devem ser removidas
 	specialTags := []string{
-		"[HALT]", "[F4]", "[PROMPT]", "[F6]", "[CHANGE COLOR TO]",
+		"[FFF2]", "[HALT]", "[F4]", "[PROMPT]", "[F6]", "[CHANGE COLOR TO]",
 		"[INIT TAIL]", "[PAUSE FOR]", "[WAIT FOR INPUT]", "[INIT TEXT BOX]",
 	}
 
 	for _, dialogue := range dialogues {
-		originalText := dialogue.Text
+		// Process content items to extract text
+		for _, contentItem := range dialogue.Content {
+			if textValue, exists := contentItem["text"]; exists {
+				if textStr, ok := textValue.(string); ok {
+					// Convert special commands to unicode before processing
+					textStr = strings.ReplaceAll(textStr, "[C04D]", "▼")
+					textStr = strings.ReplaceAll(textStr, "[C04E]", "⏷")
 
-		// Primeiro, coletar bytes sem mapeamento antes de removê-los
-		unmappedMatches := unmappedByteRegex.FindAllString(originalText, -1)
-		for _, match := range unmappedMatches {
-			unmappedSet[match] = true
-		}
+					originalText := textStr
 
-		cleanText := originalText
+					// Primeiro, coletar bytes sem mapeamento antes de removê-los
+					unmappedMatches := unmappedByteRegex.FindAllString(originalText, -1)
+					for _, match := range unmappedMatches {
+						unmappedSet[match] = true
+					}
 
-		// Remove tags especiais conhecidas
-		for _, tag := range specialTags {
-			cleanText = strings.ReplaceAll(cleanText, tag, "")
-		}
+					cleanText := originalText
 
-		// Remove bytes sem mapeamento como [8030], [8031], etc. (formato %04X)
-		cleanText = unmappedByteRegex.ReplaceAllString(cleanText, "")
+					// Remove tags especiais conhecidas
+					for _, tag := range specialTags {
+						cleanText = strings.ReplaceAll(cleanText, tag, "")
+					}
 
-		// Remove quebras de linha que podem vir das tags
-		cleanText = strings.ReplaceAll(cleanText, "\n", "")
+					// Remove bytes sem mapeamento como [8030], [8031], etc. (formato %04X)
+					cleanText = unmappedByteRegex.ReplaceAllString(cleanText, "")
 
-		// Agora conta apenas os caracteres reais que precisam de mapeamento
-		for _, char := range cleanText {
-			charSet[char] = true
+					// Remove quebras de linha que podem vir das tags
+					cleanText = strings.ReplaceAll(cleanText, "\n", "")
+
+					// Agora conta apenas os caracteres reais que precisam de mapeamento
+					for _, char := range cleanText {
+						charSet[char] = true
+					}
+				}
+			}
 		}
 	}
 
@@ -224,7 +297,7 @@ func (e *WFMFileEncoder) mapGlyphsByDialogue(dialogues []DialogueEntry) (map[int
 
 	// Lista de tags especiais conhecidas que devem ser removidas
 	specialTags := []string{
-		"[HALT]", "[F4]", "[PROMPT]", "[F6]", "[CHANGE COLOR TO]",
+		"[FFF2]", "[HALT]", "[F4]", "[PROMPT]", "[F6]", "[CHANGE COLOR TO]",
 		"[INIT TAIL]", "[PAUSE FOR]", "[WAIT FOR INPUT]", "[INIT TEXT BOX]",
 	}
 
@@ -237,34 +310,41 @@ func (e *WFMFileEncoder) mapGlyphsByDialogue(dialogues []DialogueEntry) (map[int
 			globalGlyphCache[fontHeight] = make(map[rune]Glyph)
 		}
 
-		// Limpar o texto do diálogo
-		cleanText := dialogue.Text
+		// Process content items to extract text
+		for _, contentItem := range dialogue.Content {
+			if textValue, exists := contentItem["text"]; exists {
+				if textStr, ok := textValue.(string); ok {
+					// Limpar o texto do diálogo
+					cleanText := textStr
 
-		// Remove tags especiais conhecidas
-		for _, tag := range specialTags {
-			cleanText = strings.ReplaceAll(cleanText, tag, "")
-		}
+					// Remove tags especiais conhecidas
+					for _, tag := range specialTags {
+						cleanText = strings.ReplaceAll(cleanText, tag, "")
+					}
 
-		// Remove bytes sem mapeamento
-		cleanText = unmappedByteRegex.ReplaceAllString(cleanText, "")
+					// Remove bytes sem mapeamento
+					cleanText = unmappedByteRegex.ReplaceAllString(cleanText, "")
 
-		// Remove quebras de linha
-		cleanText = strings.ReplaceAll(cleanText, "\n", "")
+					// Remove quebras de linha
+					cleanText = strings.ReplaceAll(cleanText, "\n", "")
 
-		// Processar cada caractere
-		for _, char := range cleanText {
-			// Verificar se o caractere já foi mapeado para esta altura de fonte
-			if _, exists := globalGlyphCache[fontHeight][char]; !exists {
-				// Tentar carregar o glyph
-				glyph, err := e.loadSingleGlyph(char, fontHeight, fontClut)
-				if err != nil {
-					fmt.Printf("Warning: Could not load glyph for character '%c' (U+%04X) at font height %d: %v\n", char, char, fontHeight, err)
-					continue
+					// Processar cada caractere
+					for _, char := range cleanText {
+						// Verificar se o caractere já foi mapeado para esta altura de fonte
+						if _, exists := globalGlyphCache[fontHeight][char]; !exists {
+							// Tentar carregar o glyph
+							glyph, err := e.loadSingleGlyph(char, fontHeight, fontClut)
+							if err != nil {
+								fmt.Printf("Warning: Could not load glyph for character '%c' (U+%04X) at font height %d: %v\n", char, char, fontHeight, err)
+								continue
+							}
+
+							// Armazenar no cache global
+							globalGlyphCache[fontHeight][char] = glyph
+							fmt.Printf("Loaded glyph for '%c' (U+%04X) at font height %d\n", char, char, fontHeight)
+						}
+					}
 				}
-
-				// Armazenar no cache global
-				globalGlyphCache[fontHeight][char] = glyph
-				fmt.Printf("Loaded glyph for '%c' (U+%04X) at font height %d\n", char, char, fontHeight)
 			}
 		}
 	}
@@ -273,6 +353,7 @@ func (e *WFMFileEncoder) mapGlyphsByDialogue(dialogues []DialogueEntry) (map[int
 }
 
 // assignEncodeValues assigns sequential encode values starting from 0x8000 to each mapped glyph
+// Each combination of character + font height gets a unique encode value
 func (e *WFMFileEncoder) assignEncodeValues(glyphMap map[int]map[rune]Glyph) (map[int]map[rune]uint16, map[uint16]GlyphEncodeInfo, []uint16) {
 	// Mapa para armazenar o valor de encode de cada glyph: [fontHeight][char] = encodeValue
 	glyphEncodeMap := make(map[int]map[rune]uint16)
@@ -286,50 +367,60 @@ func (e *WFMFileEncoder) assignEncodeValues(glyphMap map[int]map[rune]Glyph) (ma
 	// Contador para valores sequenciais começando em 0x8000
 	currentEncodeValue := uint16(0x8000)
 
-	// Processar cada altura de fonte
+	// Criar uma lista de todas as combinações (fontHeight, char) para ordenação consistente
+	type glyphKey struct {
+		fontHeight int
+		char       rune
+	}
+
+	var allGlyphKeys []glyphKey
 	for fontHeight, glyphs := range glyphMap {
-		// Inicializar o mapa para esta altura de fonte
+		for char := range glyphs {
+			allGlyphKeys = append(allGlyphKeys, glyphKey{fontHeight: fontHeight, char: char})
+		}
+	}
+
+	// Ordenar por altura de fonte primeiro, depois por caractere
+	// Isso garante que glifos da mesma altura fiquem agrupados, mas cada char+altura é único
+	sort.Slice(allGlyphKeys, func(i, j int) bool {
+		if allGlyphKeys[i].fontHeight != allGlyphKeys[j].fontHeight {
+			return allGlyphKeys[i].fontHeight < allGlyphKeys[j].fontHeight
+		}
+		return allGlyphKeys[i].char < allGlyphKeys[j].char
+	})
+
+	// Atribuir valores sequenciais para cada combinação única de char + fontHeight
+	for _, key := range allGlyphKeys {
+		fontHeight := key.fontHeight
+		char := key.char
+		glyph := glyphMap[fontHeight][char]
+
+		// Inicializar o mapa para esta altura de fonte se não existir
 		if glyphEncodeMap[fontHeight] == nil {
 			glyphEncodeMap[fontHeight] = make(map[rune]uint16)
 		}
 
-		// Criar uma lista ordenada de caracteres para atribuição consistente
-		var sortedChars []rune
-		for char := range glyphs {
-			sortedChars = append(sortedChars, char)
+		// Atribuir o valor de encode (cada char+altura é tratado como glifo único)
+		glyphEncodeMap[fontHeight][char] = currentEncodeValue
+
+		// Armazenar informações no mapa reverso
+		encodeValueMap[currentEncodeValue] = GlyphEncodeInfo{
+			Character:  char,
+			FontHeight: fontHeight,
+			Glyph:      glyph,
 		}
 
-		// Ordenar os caracteres para atribuição consistente
-		sort.Slice(sortedChars, func(i, j int) bool {
-			return sortedChars[i] < sortedChars[j]
-		})
+		// Adicionar à lista de ordem
+		encodeOrder = append(encodeOrder, currentEncodeValue)
 
-		// Atribuir valores sequenciais
-		for _, char := range sortedChars {
-			glyph := glyphs[char]
-
-			// Atribuir o valor de encode
-			glyphEncodeMap[fontHeight][char] = currentEncodeValue
-
-			// Armazenar informações no mapa reverso
-			encodeValueMap[currentEncodeValue] = GlyphEncodeInfo{
-				Character:  char,
-				FontHeight: fontHeight,
-				Glyph:      glyph,
-			}
-
-			// Adicionar à lista de ordem
-			encodeOrder = append(encodeOrder, currentEncodeValue)
-
-			// Incrementar para o próximo valor
-			currentEncodeValue++
-		}
+		// Incrementar para o próximo valor
+		currentEncodeValue++
 	}
 
 	return glyphEncodeMap, encodeValueMap, encodeOrder
 }
 
-// recodeDialogueTexts recodes dialogue texts using the glyph encode mapping
+// recodeDialogueTexts recodes dialogue content using the glyph encode mapping and handles content structure
 func (e *WFMFileEncoder) recodeDialogueTexts(dialogues []DialogueEntry, glyphEncodeMap map[int]map[rune]uint16) ([]RecodedDialogue, error) {
 	var recodedDialogues []RecodedDialogue
 
@@ -338,87 +429,250 @@ func (e *WFMFileEncoder) recodeDialogueTexts(dialogues []DialogueEntry, glyphEnc
 
 	// Lista de tags especiais conhecidas que devem ser convertidas para códigos especiais
 	specialTagMap := map[string]uint16{
+		"[FFF2]":            FFF2,
 		"[HALT]":            HALT,
 		"[F4]":              F4,
 		"[PROMPT]":          PROMPT,
 		"[F6]":              F6,
-		"[CHANGE COLOR TO]": 0xFFF2, // TODO: verificar código correto
-		"[INIT TAIL]":       0xFFF1, // TODO: verificar código correto
-		"[PAUSE FOR]":       0xFFF0, // TODO: verificar código correto
-		"[WAIT FOR INPUT]":  0xFFEF, // TODO: verificar código correto
-		"[INIT TEXT BOX]":   0xFFEE, // TODO: verificar código correto
+		"[CHANGE COLOR TO]": CHANGE_COLOR_TO,
+		"[INIT TAIL]":       INIT_TAIL,
+		"[PAUSE FOR]":       PAUSE_FOR,
+		"[C04D]":            C04D,
+		"[C04E]":            C04E,
+		"[WAIT FOR INPUT]":  WAIT_FOR_INPUT,
+		"[INIT TEXT BOX]":   INIT_TEXT_BOX,
 	}
 
 	for _, dialogue := range dialogues {
 		fontHeight := int(dialogue.FontHeight)
 
 		// Verificar se temos mapeamento para esta altura de fonte
+		// Nota: Permitir mapeamento vazio quando o diálogo só contém códigos especiais
 		if glyphEncodeMap[fontHeight] == nil {
-			return nil, fmt.Errorf("no glyph mapping found for font height %d in dialogue %d", fontHeight, dialogue.ID)
+			// Inicializar mapeamento vazio se não existir
+			glyphEncodeMap[fontHeight] = make(map[rune]uint16)
 		}
 
 		var encodedText []uint16
-		originalText := dialogue.Text
+		var fullOriginalText strings.Builder
 
-		// Processar o texto caractere por caractere e tag por tag
-		i := 0
-		for i < len(originalText) {
-			// Verificar se é uma tag especial
-			if originalText[i] == '[' {
-				tagProcessed := false
-
-				// Verificar tags especiais conhecidas
-				for tag, code := range specialTagMap {
-					if i+len(tag) <= len(originalText) && originalText[i:i+len(tag)] == tag {
-						encodedText = append(encodedText, code)
-						i += len(tag)
-						tagProcessed = true
-						break
+		// Process content items sequentially
+		for _, contentItem := range dialogue.Content {
+			// Handle box content
+			if boxValue, exists := contentItem["box"]; exists {
+				if boxMap, ok := boxValue.(map[string]interface{}); ok {
+					encodedText = append(encodedText, INIT_TEXT_BOX)
+					if width, hasWidth := boxMap["width"]; hasWidth {
+						if w, ok := width.(int); ok {
+							encodedText = append(encodedText, uint16(w))
+						}
+					}
+					if height, hasHeight := boxMap["height"]; hasHeight {
+						if h, ok := height.(int); ok {
+							encodedText = append(encodedText, uint16(h))
+						}
 					}
 				}
-
-				if tagProcessed {
-					continue
-				}
-
-				// Verificar se é um byte sem mapeamento [XXXX]
-				if i+6 <= len(originalText) {
-					possibleUnmapped := originalText[i : i+6]
-					if unmappedByteRegex.MatchString(possibleUnmapped) {
-						// Pular bytes sem mapeamento (não incluir no encode)
-						fmt.Printf("Warning: Skipping unmapped byte %s in dialogue %d\n", possibleUnmapped, dialogue.ID)
-						i += 6
-						continue
-					}
-				}
+				continue
 			}
 
-			// Processar caractere normal
-			if i < len(originalText) {
-				char := rune(originalText[i])
-
-				// Pular quebras de linha
-				if char == '\n' {
-					i++
-					continue
+			// Handle tail content
+			if tailValue, exists := contentItem["tail"]; exists {
+				if tailMap, ok := tailValue.(map[string]interface{}); ok {
+					encodedText = append(encodedText, INIT_TAIL)
+					if width, hasWidth := tailMap["width"]; hasWidth {
+						if w, ok := width.(int); ok {
+							encodedText = append(encodedText, uint16(w))
+						}
+					}
+					if height, hasHeight := tailMap["height"]; hasHeight {
+						if h, ok := height.(int); ok {
+							encodedText = append(encodedText, uint16(h))
+						}
+					}
 				}
+				continue
+			}
 
-				// Verificar se temos mapeamento para este caractere
-				if encodeValue, exists := glyphEncodeMap[fontHeight][char]; exists {
-					encodedText = append(encodedText, encodeValue)
-				} else {
-					fmt.Printf("Warning: No encode mapping found for character '%c' (U+%04X) in dialogue %d\n", char, char, dialogue.ID)
+			// Handle f6 content
+			if f6Value, exists := contentItem["f6"]; exists {
+				if f6Map, ok := f6Value.(map[string]interface{}); ok {
+					encodedText = append(encodedText, F6)
+					if width, hasWidth := f6Map["width"]; hasWidth {
+						if w, ok := width.(int); ok {
+							encodedText = append(encodedText, uint16(w))
+						}
+					}
+					if height, hasHeight := f6Map["height"]; hasHeight {
+						if h, ok := height.(int); ok {
+							encodedText = append(encodedText, uint16(h))
+						}
+					}
 				}
+				continue
+			}
 
-				i++
+			// Handle color content
+			if colorValue, exists := contentItem["color"]; exists {
+				if colorMap, ok := colorValue.(map[string]interface{}); ok {
+					encodedText = append(encodedText, CHANGE_COLOR_TO)
+					if value, hasValue := colorMap["value"]; hasValue {
+						if v, ok := value.(int); ok {
+							encodedText = append(encodedText, uint16(v))
+						}
+					}
+				}
+				continue
+			}
+
+			// Handle pause content
+			if pauseValue, exists := contentItem["pause"]; exists {
+				if pauseMap, ok := pauseValue.(map[string]interface{}); ok {
+					encodedText = append(encodedText, PAUSE_FOR)
+					if duration, hasDuration := pauseMap["duration"]; hasDuration {
+						if d, ok := duration.(int); ok {
+							encodedText = append(encodedText, uint16(d))
+						}
+					}
+				}
+				continue
+			}
+
+			// Handle fff2 content
+			if fff2Value, exists := contentItem["fff2"]; exists {
+				if fff2Map, ok := fff2Value.(map[string]interface{}); ok {
+					encodedText = append(encodedText, FFF2)
+					if value, hasValue := fff2Map["value"]; hasValue {
+						if v, ok := value.(int); ok {
+							encodedText = append(encodedText, uint16(v))
+						}
+					}
+				}
+				continue
+			}
+
+			// Handle text content
+			if textValue, exists := contentItem["text"]; exists {
+				if textStr, ok := textValue.(string); ok {
+					fullOriginalText.WriteString(textStr)
+
+					// Processar o texto caractere por caractere e tag por tag
+					originalText := textStr
+					runes := []rune(originalText)
+					i := 0
+					for i < len(runes) {
+						// Verificar se é uma tag especial - convertendo de volta para string para verificar
+						currentText := string(runes[i:])
+						if len(currentText) > 0 && currentText[0] == '[' {
+							tagProcessed := false
+
+							// Verificar tags especiais conhecidas
+							for tag, code := range specialTagMap {
+								tagRunes := []rune(tag)
+								if i+len(tagRunes) <= len(runes) {
+									match := true
+									for j, tagRune := range tagRunes {
+										if runes[i+j] != tagRune {
+											match = false
+											break
+										}
+									}
+									if match {
+										encodedText = append(encodedText, code)
+										i += len(tagRunes)
+										tagProcessed = true
+										break
+									}
+								}
+							}
+
+							if tagProcessed {
+								continue
+							}
+
+							// Verificar se é um byte sem mapeamento [XXXX]
+							remainingText := string(runes[i:])
+							if len(remainingText) >= 6 {
+								possibleUnmapped := remainingText[:6]
+								if unmappedByteRegex.MatchString(possibleUnmapped) {
+									// Pular bytes sem mapeamento (não incluir no encode)
+									fmt.Printf("Warning: Skipping unmapped byte %s in dialogue %d\n", possibleUnmapped, dialogue.ID)
+									i += 6
+									continue
+								}
+							}
+						}
+
+						// Handle special unicode characters
+						if i < len(runes) {
+							char := runes[i]
+
+							// Handle ▼ (C04D unicode)
+							if char == '▼' {
+								encodedText = append(encodedText, C04D)
+								i++
+								continue
+							}
+
+							// Handle ⏷ (C04E unicode)
+							if char == '⏷' {
+								encodedText = append(encodedText, C04E)
+								i++
+								continue
+							}
+
+							// Handle ⧗ (WAIT_FOR_INPUT unicode)
+							if char == '⧗' {
+								encodedText = append(encodedText, WAIT_FOR_INPUT)
+								i++
+								continue
+							}
+
+							// Handle newlines - check for double newlines first
+							if char == '\n' {
+								// Check if this is a double newline (\n\n)
+								if i+1 < len(runes) && runes[i+1] == '\n' {
+									encodedText = append(encodedText, DOUBLE_NEWLINE)
+									i += 2 // Skip both newline characters
+								} else {
+									encodedText = append(encodedText, NEWLINE)
+									i++
+								}
+								continue
+							}
+
+							// Verificar se temos mapeamento para este caractere
+							if encodeValue, exists := glyphEncodeMap[fontHeight][char]; exists {
+								encodedText = append(encodedText, encodeValue)
+							} else {
+								fmt.Printf("Warning: No encode mapping found for character '%c' (U+%04X) in dialogue %d\n", char, char, dialogue.ID)
+							}
+
+							i++
+						}
+					}
+				}
 			}
 		}
+
+		// Add termination marker from dialogue terminator property
+		// Convert terminator value (1 or 2) back to hex values
+		var terminatorHex uint16
+		switch dialogue.Terminator {
+		case 1:
+			terminatorHex = 0xFFFE // TERMINATOR_1
+		case 2:
+			terminatorHex = 0xFFFF // TERMINATOR_2
+		default:
+			terminatorHex = 0xFFFF // Default to TERMINATOR_2
+		}
+		encodedText = append(encodedText, terminatorHex)
 
 		recodedDialogue := RecodedDialogue{
 			ID:           dialogue.ID,
 			Type:         dialogue.Type,
 			FontHeight:   uint16(dialogue.FontHeight),
-			OriginalText: dialogue.Text,
+			OriginalText: fullOriginalText.String(),
 			EncodedText:  encodedText,
 		}
 
@@ -453,8 +707,24 @@ func (e *WFMFileEncoder) formatEncodedText(encodedText []uint16) string {
 	return result.String()
 }
 
+// alignToBytes ensures a value is aligned to the specified byte boundary
+func alignToBytes(value uint32, alignment uint32) uint32 {
+	if alignment == 0 {
+		return value
+	}
+	return ((value + alignment - 1) / alignment) * alignment
+}
+
+// alignToBytes16 ensures a value is aligned to the specified byte boundary for uint16
+func alignToBytes16(value uint16, alignment uint16) uint16 {
+	if alignment == 0 {
+		return value
+	}
+	return ((value + alignment - 1) / alignment) * alignment
+}
+
 // buildWFMFile constructs a complete WFM file from the processed data
-func (e *WFMFileEncoder) buildWFMFile(glyphMap map[int]map[rune]Glyph, encodeValueMap map[uint16]GlyphEncodeInfo, encodeOrder []uint16, recodedDialogues []RecodedDialogue) (*WFMFile, error) {
+func (e *WFMFileEncoder) buildWFMFile(glyphMap map[int]map[rune]Glyph, encodeValueMap map[uint16]GlyphEncodeInfo, encodeOrder []uint16, recodedDialogues []RecodedDialogue, reservedData []byte) (*WFMFile, error) {
 	// Criar lista ordenada de glifos usando encodeOrder
 	var glyphs []Glyph
 	for _, encodeValue := range encodeOrder {
@@ -463,6 +733,11 @@ func (e *WFMFileEncoder) buildWFMFile(glyphMap map[int]map[rune]Glyph, encodeVal
 	}
 
 	// Converter diálogos recodificados para formato WFM
+	// Primeiro, ordenar os diálogos por ID para garantir a sequência correta
+	sort.Slice(recodedDialogues, func(i, j int) bool {
+		return recodedDialogues[i].ID < recodedDialogues[j].ID
+	})
+
 	var dialogues []Dialogue
 	for _, recodedDialogue := range recodedDialogues {
 		// Converter os valores uint16 para bytes (little endian)
@@ -472,10 +747,6 @@ func (e *WFMFileEncoder) buildWFMFile(glyphMap map[int]map[rune]Glyph, encodeVal
 			dialogueData = append(dialogueData, byte(value&0xFF))      // byte baixo
 			dialogueData = append(dialogueData, byte((value>>8)&0xFF)) // byte alto
 		}
-
-		// Adicionar terminador
-		dialogueData = append(dialogueData, byte(TERMINATOR_2&0xFF))      // 0xFE
-		dialogueData = append(dialogueData, byte((TERMINATOR_2>>8)&0xFF)) // 0xFF
 
 		dialogue := Dialogue{
 			Data: dialogueData,
@@ -500,27 +771,51 @@ func (e *WFMFileEncoder) buildWFMFile(glyphMap map[int]map[rune]Glyph, encodeVal
 	var dialoguePointerTable []uint16
 	currentDialogueOffset := uint16(len(dialogues) * 2) // Tamanho da tabela de ponteiros
 
+	// Garantir que os dados dos diálogos sejam byte-aligned (alinhamento de 2 bytes)
+	currentDialogueOffset = alignToBytes16(currentDialogueOffset, 2)
+
 	for _, dialogue := range dialogues {
 		dialoguePointerTable = append(dialoguePointerTable, currentDialogueOffset)
-		currentDialogueOffset += uint16(len(dialogue.Data))
+		dialogueSize := uint16(len(dialogue.Data))
+		// Garantir que cada diálogo seja byte-aligned
+		alignedDialogueSize := alignToBytes16(dialogueSize, 2)
+		currentDialogueOffset += alignedDialogueSize
 	}
 
 	// Calcular posição da tabela de ponteiros dos diálogos
 	totalGlyphsSize := uint32(0)
 	for _, glyph := range glyphs {
-		totalGlyphsSize += uint32(8 + len(glyph.GlyphImage))
+		glyphSize := uint32(8 + len(glyph.GlyphImage))
+		// Garantir que cada glifo seja byte-aligned
+		alignedGlyphSize := alignToBytes(glyphSize, 2)
+		totalGlyphsSize += alignedGlyphSize
 	}
 
 	dialoguePointerTableOffset := headerSize + glyphTableSize + totalGlyphsSize
+	// Garantir que a tabela de ponteiros dos diálogos seja byte-aligned
+	dialoguePointerTableOffset = alignToBytes(dialoguePointerTableOffset, 2)
 
 	// Criar header
+	var reservedBytes [128]byte
+	if len(reservedData) > 0 {
+		// Ensure reservedData is exactly 128 bytes
+		if len(reservedData) != 128 {
+			return nil, fmt.Errorf("reservedData must be exactly 128 bytes, got %d", len(reservedData))
+		}
+		// Use reserved data from special dialogues
+		copy(reservedBytes[:], reservedData)
+	}
+	// If reservedData is empty or nil, reservedBytes remains zero-filled
+
+	fmt.Printf("Reserved section: %d bytes used in header\n", len(reservedBytes))
+
 	header := WFMHeader{
 		Magic:                [4]byte{'W', 'F', 'M', '3'},
 		Padding:              0,
 		DialoguePointerTable: dialoguePointerTableOffset,
 		TotalDialogues:       uint16(len(dialogues)),
 		TotalGlyphs:          uint16(len(glyphs)),
-		Reserved:             [128]byte{}, // Zerado
+		Reserved:             reservedBytes,
 	}
 
 	// Criar arquivo WFM completo
@@ -585,6 +880,35 @@ func (e *WFMFileEncoder) writeWFMFile(wfm *WFMFile, outputFile string) error {
 		if err != nil {
 			return fmt.Errorf("failed to write glyph image: %w", err)
 		}
+
+		// Aplicar padding para garantir alinhamento de 2 bytes para cada glifo
+		glyphSize := uint32(8 + len(glyph.GlyphImage))
+		alignedGlyphSize := alignToBytes(glyphSize, 2)
+		paddingSize := alignedGlyphSize - glyphSize
+		if paddingSize > 0 {
+			padding := make([]byte, paddingSize)
+			_, err = file.Write(padding)
+			if err != nil {
+				return fmt.Errorf("failed to write glyph padding: %w", err)
+			}
+		}
+	}
+
+	// Garantir que a posição atual esteja alinhada antes da tabela de ponteiros dos diálogos
+	var currentPos int64
+	currentPos, err = file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return fmt.Errorf("failed to get current file position: %w", err)
+	}
+
+	alignedPos := alignToBytes(uint32(currentPos), 2)
+	paddingForTable := alignedPos - uint32(currentPos)
+	if paddingForTable > 0 {
+		padding := make([]byte, paddingForTable)
+		_, err = file.Write(padding)
+		if err != nil {
+			return fmt.Errorf("failed to write table alignment padding: %w", err)
+		}
 	}
 
 	// Escrever tabela de ponteiros dos diálogos
@@ -596,11 +920,50 @@ func (e *WFMFileEncoder) writeWFMFile(wfm *WFMFile, outputFile string) error {
 	}
 
 	// Escrever diálogos
-	for _, dialogue := range wfm.Dialogues {
+	for i, dialogue := range wfm.Dialogues {
 		_, err = file.Write(dialogue.Data)
 		if err != nil {
 			return fmt.Errorf("failed to write dialogue data: %w", err)
 		}
+
+		// Aplicar padding para garantir alinhamento de 2 bytes para cada diálogo
+		dialogueSize := uint16(len(dialogue.Data))
+		alignedDialogueSize := alignToBytes16(dialogueSize, 2)
+		paddingSize := alignedDialogueSize - dialogueSize
+		if paddingSize > 0 && i < len(wfm.Dialogues)-1 { // Não aplicar padding no último diálogo
+			padding := make([]byte, paddingSize)
+			_, err = file.Write(padding)
+			if err != nil {
+				return fmt.Errorf("failed to write dialogue padding: %w", err)
+			}
+		}
+	}
+
+	// Get current file size and apply padding if necessary
+	currentPos, err = file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return fmt.Errorf("failed to get current file position: %w", err)
+	}
+
+	// If we have an original size and current file is smaller, pad with 0xFF
+	if e.originalSize > 0 && currentPos < e.originalSize {
+		paddingSize := e.originalSize - currentPos
+		padding := make([]byte, paddingSize)
+		// Fill with 0xFF
+		for i := range padding {
+			padding[i] = 0xFF
+		}
+
+		_, err = file.Write(padding)
+		if err != nil {
+			return fmt.Errorf("failed to write padding: %w", err)
+		}
+
+		fmt.Printf("Added %d bytes of 0xFF padding to maintain original file size (%d bytes)\n",
+			paddingSize, e.originalSize)
+	} else if e.originalSize > 0 && currentPos > e.originalSize {
+		fmt.Printf("Warning: Encoded file (%d bytes) is larger than original (%d bytes)\n",
+			currentPos, e.originalSize)
 	}
 
 	return nil
@@ -661,6 +1024,11 @@ func (e *WFMFileEncoder) loadSingleGlyph(char rune, fontHeight int, fontClut uin
 func (e *WFMFileEncoder) getGlyphPath(char rune, fontHeight int) (string, error) {
 	unicode := uint32(char)
 	filename := fmt.Sprintf("%04X.png", unicode)
+
+	// Handle special characters that map to 2B8B.png
+	if char == '▼' || char == '⏷' { // U+25BC or U+23F7 -> 2B8B.png
+		filename = "2B8B.png"
+	}
 
 	// Buscar o arquivo na pasta da altura correspondente
 	fontDir := filepath.Join("fonts", fmt.Sprintf("%d", fontHeight))
