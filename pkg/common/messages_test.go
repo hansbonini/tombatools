@@ -127,14 +127,16 @@ func TestFormatError_NilError(t *testing.T) {
 	baseMessage := "Base error message"
 	var nilError error = nil
 
-	// This should panic as the current implementation doesn't handle nil
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("FormatError() should panic with nil error")
-		}
-	}()
+	// FormatError should handle nil gracefully by treating it as a regular value
+	result := FormatError(baseMessage, nilError)
+	if result == nil {
+		t.Error("FormatError() should return an error even with nil input")
+	}
 
-	FormatError(baseMessage, nilError)
+	expectedMsg := "Base error message: <nil>"
+	if result.Error() != expectedMsg {
+		t.Errorf("FormatError() with nil error = %q, want %q", result.Error(), expectedMsg)
+	}
 }
 
 func TestErrorConstants(t *testing.T) {

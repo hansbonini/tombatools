@@ -156,11 +156,14 @@ func LogDebug(message string, args ...interface{}) {
 
 // FormatError creates a formatted error with additional context
 func FormatError(baseMessage string, details interface{}) error {
-	return fmt.Errorf("%s: %w", baseMessage, details.(error))
+	if err, ok := details.(error); ok {
+		return fmt.Errorf("%s: %w", baseMessage, err)
+	}
+	return fmt.Errorf("%s: %v", baseMessage, details)
 }
 
 // FormatErrorString creates a formatted error with string details
-func FormatErrorString(baseMessage string, details string, args ...interface{}) error {
+func FormatErrorString(baseMessage, details string, args ...interface{}) error {
 	if len(args) > 0 {
 		return fmt.Errorf("%s: "+details, append([]interface{}{baseMessage}, args...)...)
 	}

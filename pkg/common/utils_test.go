@@ -207,8 +207,12 @@ func TestReadFunctions_BinaryCompatibility(t *testing.T) {
 	test16 := uint16(0x1234)
 	test32 := uint32(0x12345678)
 
-	binary.Write(&buffer, binary.LittleEndian, test16)
-	binary.Write(&buffer, binary.LittleEndian, test32)
+	if err := binary.Write(&buffer, binary.LittleEndian, test16); err != nil {
+		t.Fatalf("Failed to write test16: %v", err)
+	}
+	if err := binary.Write(&buffer, binary.LittleEndian, test32); err != nil {
+		t.Fatalf("Failed to write test32: %v", err)
+	}
 
 	reader := bytes.NewReader(buffer.Bytes())
 

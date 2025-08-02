@@ -182,7 +182,12 @@ func TestPSXTile_ToFromImage(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		got := color.RGBAModel.Convert(resultImg.At(tc.x, tc.y)).(color.RGBA)
+		convertedColor := color.RGBAModel.Convert(resultImg.At(tc.x, tc.y))
+		got, ok := convertedColor.(color.RGBA)
+		if !ok {
+			t.Errorf("Failed to convert color at (%d, %d) to RGBA", tc.x, tc.y)
+			continue
+		}
 		if got != tc.expected {
 			t.Errorf("Image color at (%d, %d) = %v, want %v", tc.x, tc.y, got, tc.expected)
 		}

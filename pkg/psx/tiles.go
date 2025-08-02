@@ -31,9 +31,10 @@ func (c PSXColor) ToRGBA() color.RGBA {
 	psxColor := uint16(c)
 
 	// Extract RGB components from 15-bit PSX format (0BBBBBGGGGGRRRRR)
-	r := uint8((psxColor & 0x1F) << 3)         // Red: bits 0-4
-	g := uint8(((psxColor >> 5) & 0x1F) << 3)  // Green: bits 5-9
-	b := uint8(((psxColor >> 10) & 0x1F) << 3) // Blue: bits 10-14
+	// These conversions are safe: bit masks (0x1F = 31) ensure max value of 31, and << 3 gives max 248 (fits in uint8)
+	r := uint8((psxColor & 0x1F) << 3)         // Red: bits 0-4, max value 31 << 3 = 248
+	g := uint8(((psxColor >> 5) & 0x1F) << 3)  // Green: bits 5-9, max value 31 << 3 = 248
+	b := uint8(((psxColor >> 10) & 0x1F) << 3) // Blue: bits 10-14, max value 31 << 3 = 248
 
 	// Full opacity for visible colors, transparent for color 0
 	var a uint8 = 255
@@ -94,7 +95,10 @@ func (p PSXPalette) FindClosestColor(c color.RGBA) uint8 {
 		distance := colorDistance(targetPSX, paletteColor)
 		if distance < bestDistance {
 			bestDistance = distance
-			bestIndex = uint8(i)
+			// Safe conversion: i is bounded by palette size (typically 16 or 256)
+			if i <= 255 {
+				bestIndex = uint8(i)
+			}
 		}
 	}
 
@@ -110,7 +114,11 @@ func colorDistance(c1, c2 PSXColor) uint32 {
 	dg := int32(rgba1.G) - int32(rgba2.G)
 	db := int32(rgba1.B) - int32(rgba2.B)
 
-	return uint32(dr*dr + dg*dg + db*db)
+	// Safe conversion: squared color differences are always positive and bounded
+	// Max squared difference per component: 255^2 = 65025
+	// Max total distance: 3 * 65025 = 195075, which fits comfortably in uint32
+	distance := dr*dr + dg*dg + db*db
+	return uint32(distance) // Safe: distance is always positive and bounded
 }
 
 // PSXTile represents a tile in PSX 4bpp linear little endian format
@@ -214,7 +222,11 @@ func (t *PSXTile) FromImage(img image.Image) error {
 
 	for y := 0; y < t.Height; y++ {
 		for x := 0; x < t.Width; x++ {
-			imgColor := color.RGBAModel.Convert(img.At(bounds.Min.X+x, bounds.Min.Y+y)).(color.RGBA)
+			convertedColor := color.RGBAModel.Convert(img.At(bounds.Min.X+x, bounds.Min.Y+y))
+			imgColor, ok := convertedColor.(color.RGBA)
+			if !ok {
+				return fmt.Errorf("failed to convert color at pixel (%d, %d) to RGBA", x, y)
+			}
 			paletteIndex := t.Palette.FindClosestColor(imgColor)
 
 			if err := t.SetPixel(x, y, paletteIndex); err != nil {

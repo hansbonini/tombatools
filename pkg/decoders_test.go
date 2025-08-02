@@ -9,6 +9,13 @@ import (
 	"github.com/hansbonini/tombatools/pkg/common"
 )
 
+// Helper function to write binary data with error checking
+func writeBinary(t *testing.T, buffer *bytes.Buffer, data interface{}) {
+	if err := binary.Write(buffer, binary.LittleEndian, data); err != nil {
+		t.Fatalf("Failed to write binary data: %v", err)
+	}
+}
+
 func TestNewWFMDecoder(t *testing.T) {
 	decoder := NewWFMDecoder()
 	if decoder == nil {
@@ -83,7 +90,7 @@ func TestWFMFileDecoder_DecodeHeader_InvalidMagic(t *testing.T) {
 	}
 
 	expectedMsg := "invalid magic header"
-	if err != nil && len(err.Error()) > 0 {
+	if err != nil && err.Error() != "" {
 		// Check if error message contains expected text
 		if !bytes.Contains([]byte(err.Error()), []byte(expectedMsg)) {
 			t.Errorf("Error message %q should contain %q", err.Error(), expectedMsg)
@@ -113,14 +120,14 @@ func TestWFMFileDecoder_DecodeGlyphs(t *testing.T) {
 	var buffer bytes.Buffer
 
 	// Write glyph pointer table
-	binary.Write(&buffer, binary.LittleEndian, uint16(0x1000))
-	binary.Write(&buffer, binary.LittleEndian, uint16(0x2000))
+	writeBinary(t, &buffer, uint16(0x1000))
+	writeBinary(t, &buffer, uint16(0x2000))
 
 	// Write glyph data for first glyph
-	binary.Write(&buffer, binary.LittleEndian, uint16(0xABCD)) // GlyphClut
-	binary.Write(&buffer, binary.LittleEndian, uint16(16))     // GlyphHeight
-	binary.Write(&buffer, binary.LittleEndian, uint16(8))      // GlyphWidth
-	binary.Write(&buffer, binary.LittleEndian, uint16(0))      // GlyphHandakuten
+	writeBinary(t, &buffer, uint16(0xABCD)) // GlyphClut
+	writeBinary(t, &buffer, uint16(16))     // GlyphHeight
+	writeBinary(t, &buffer, uint16(8))      // GlyphWidth
+	writeBinary(t, &buffer, uint16(0))      // GlyphHandakuten
 
 	// Write image data (8*16 pixels = 128 pixels, 4bpp = 64 bytes)
 	imageSize := (8*16 + 1) / 2
@@ -131,10 +138,10 @@ func TestWFMFileDecoder_DecodeGlyphs(t *testing.T) {
 	buffer.Write(imageData)
 
 	// Write glyph data for second glyph
-	binary.Write(&buffer, binary.LittleEndian, uint16(0x1234)) // GlyphClut
-	binary.Write(&buffer, binary.LittleEndian, uint16(24))     // GlyphHeight
-	binary.Write(&buffer, binary.LittleEndian, uint16(12))     // GlyphWidth
-	binary.Write(&buffer, binary.LittleEndian, uint16(1))      // GlyphHandakuten
+	writeBinary(t, &buffer, uint16(0x1234)) // GlyphClut
+	writeBinary(t, &buffer, uint16(24))     // GlyphHeight
+	writeBinary(t, &buffer, uint16(12))     // GlyphWidth
+	writeBinary(t, &buffer, uint16(1))      // GlyphHandakuten
 
 	// Write image data for second glyph
 	imageSize2 := (12*24 + 1) / 2
@@ -236,19 +243,19 @@ func TestWFMFileDecoder_DecodeDialogues(t *testing.T) {
 	var buffer bytes.Buffer
 
 	// Write dialogue pointer table
-	binary.Write(&buffer, binary.LittleEndian, uint16(0x04)) // Relative offset to first dialogue (after pointer table)
-	binary.Write(&buffer, binary.LittleEndian, uint16(0x0C)) // Relative offset to second dialogue
+	writeBinary(t, &buffer, uint16(0x04)) // Relative offset to first dialogue (after pointer table)
+	writeBinary(t, &buffer, uint16(0x0C)) // Relative offset to second dialogue
 
 	// Write first dialogue data (starting right after pointer table)
-	binary.Write(&buffer, binary.LittleEndian, uint16(0xFFFA)) // INIT_TEXT_BOX
-	binary.Write(&buffer, binary.LittleEndian, uint16(0x0010)) // Width
-	binary.Write(&buffer, binary.LittleEndian, uint16(0x0008)) // Height
-	binary.Write(&buffer, binary.LittleEndian, uint16(0xFFFF)) // Terminator
+	writeBinary(t, &buffer, uint16(0xFFFA)) // INIT_TEXT_BOX
+	writeBinary(t, &buffer, uint16(0x0010)) // Width
+	writeBinary(t, &buffer, uint16(0x0008)) // Height
+	writeBinary(t, &buffer, uint16(0xFFFF)) // Terminator
 
 	// Write second dialogue data
-	binary.Write(&buffer, binary.LittleEndian, uint16(0xFFFD)) // NEWLINE
-	binary.Write(&buffer, binary.LittleEndian, uint16(0xFFFC)) // WAIT_FOR_INPUT
-	binary.Write(&buffer, binary.LittleEndian, uint16(0xFFFF)) // Terminator
+	writeBinary(t, &buffer, uint16(0xFFFD)) // NEWLINE
+	writeBinary(t, &buffer, uint16(0xFFFC)) // WAIT_FOR_INPUT
+	writeBinary(t, &buffer, uint16(0xFFFF)) // Terminator
 
 	// Create a mock reader with seeking capability
 	mockReader := newMockReadSeeker(buffer.Bytes())
@@ -293,7 +300,7 @@ func TestWFMFileDecoder_DecodeDialogues_NullPointer(t *testing.T) {
 	var buffer bytes.Buffer
 
 	// Write null pointer
-	binary.Write(&buffer, binary.LittleEndian, uint16(0x0000))
+	writeBinary(t, &buffer, uint16(0x0000))
 
 	mockReader := newMockReadSeeker(buffer.Bytes())
 
@@ -327,29 +334,29 @@ func TestWFMFileDecoder_Decode_Complete(t *testing.T) {
 
 	// Write complete WFM file
 	// Header
-	buffer.Write([]byte(common.WFMFileMagic))                  // Magic
-	binary.Write(&buffer, binary.LittleEndian, uint32(0))      // Padding
-	binary.Write(&buffer, binary.LittleEndian, uint32(0x1000)) // DialoguePointerTable
-	binary.Write(&buffer, binary.LittleEndian, uint16(1))      // TotalDialogues
-	binary.Write(&buffer, binary.LittleEndian, uint16(1))      // TotalGlyphs
-	buffer.Write(make([]byte, 128))                            // Reserved
+	buffer.Write([]byte(common.WFMFileMagic)) // Magic
+	writeBinary(t, &buffer, uint32(0))        // Padding
+	writeBinary(t, &buffer, uint32(0x1000))   // DialoguePointerTable
+	writeBinary(t, &buffer, uint16(1))        // TotalDialogues
+	writeBinary(t, &buffer, uint16(1))        // TotalGlyphs
+	buffer.Write(make([]byte, 128))           // Reserved
 
 	// Glyph pointer table
-	binary.Write(&buffer, binary.LittleEndian, uint16(0x2000))
+	writeBinary(t, &buffer, uint16(0x2000))
 
 	// Glyph data
-	binary.Write(&buffer, binary.LittleEndian, uint16(0x1234)) // GlyphClut
-	binary.Write(&buffer, binary.LittleEndian, uint16(8))      // GlyphHeight
-	binary.Write(&buffer, binary.LittleEndian, uint16(8))      // GlyphWidth
-	binary.Write(&buffer, binary.LittleEndian, uint16(0))      // GlyphHandakuten
-	buffer.Write(make([]byte, 32))                             // Image data (8*8/2 = 32 bytes)
+	writeBinary(t, &buffer, uint16(0x1234)) // GlyphClut
+	writeBinary(t, &buffer, uint16(8))      // GlyphHeight
+	writeBinary(t, &buffer, uint16(8))      // GlyphWidth
+	writeBinary(t, &buffer, uint16(0))      // GlyphHandakuten
+	buffer.Write(make([]byte, 32))          // Image data (8*8/2 = 32 bytes)
 
 	// Dialogue pointer table
-	binary.Write(&buffer, binary.LittleEndian, uint16(0x10))
+	writeBinary(t, &buffer, uint16(0x10))
 
 	// Dialogue data
-	binary.Write(&buffer, binary.LittleEndian, uint16(0xFFFA)) // INIT_TEXT_BOX
-	binary.Write(&buffer, binary.LittleEndian, uint16(0xFFFF)) // Terminator
+	writeBinary(t, &buffer, uint16(0xFFFA)) // INIT_TEXT_BOX
+	writeBinary(t, &buffer, uint16(0xFFFF)) // Terminator
 
 	mockReader := newMockReadSeeker(buffer.Bytes())
 

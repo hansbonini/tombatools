@@ -17,8 +17,8 @@ func IsValidWFMFile(reader io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("failed to read WFM header: %w", err)
 	}
-	if string(magic[:]) != WFMFileMagic {
-		return fmt.Errorf("invalid WFM header: expected '%s', got '%s'", WFMFileMagic, string(magic[:]))
+	if string(magic) != WFMFileMagic {
+		return fmt.Errorf("invalid WFM header: expected '%s', got '%s'", WFMFileMagic, string(magic))
 	}
 	return nil
 }

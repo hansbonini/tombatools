@@ -218,8 +218,7 @@ func (d *WFMFileDecoder) DecodeDialogues(reader io.Reader, header *WFMHeader) ([
 				}
 
 				// Add word to dialogue data (little endian)
-				dialogueData = append(dialogueData, byte(word&0xFF))
-				dialogueData = append(dialogueData, byte((word>>8)&0xFF))
+				dialogueData = append(dialogueData, byte(word&0xFF), byte((word>>8)&0xFF))
 			}
 
 			dialogues[i] = Dialogue{Data: dialogueData}

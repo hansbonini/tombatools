@@ -39,7 +39,7 @@ func NewWFMExporter() *WFMFileExporter {
 func (e *WFMFileExporter) ExportGlyphs(wfm *WFMFile, outputDir string) error {
 	// Create glyphs subdirectory for organizing exported glyph images
 	glyphsDir := filepath.Join(outputDir, "glyphs")
-	if err := os.MkdirAll(glyphsDir, 0755); err != nil {
+	if err := os.MkdirAll(glyphsDir, 0o750); err != nil {
 		return fmt.Errorf("failed to create glyphs directory: %w", err)
 	}
 
@@ -99,10 +99,12 @@ func (e *WFMFileExporter) ExportGlyphs(wfm *WFMFile, outputDir string) error {
 		}
 
 		if err := png.Encode(file, glyphImg); err != nil {
-			file.Close()
+			_ = file.Close() // Ignore close error, encode error is more important
 			return fmt.Errorf("failed to encode PNG for glyph %d: %w", glyphIndex, err)
 		}
-		file.Close()
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("failed to close PNG file for glyph %d: %w", glyphIndex, err)
+		}
 
 		common.LogDebug(common.DebugGlyphExported,
 			glyphIndex, glyph.GlyphWidth, glyph.GlyphHeight,
@@ -405,7 +407,7 @@ func (e *WFMFileExporter) ExportDialogues(wfm *WFMFile, outputDir string) error 
 	}
 
 	// Process each dialogue using data already extracted in DecodeDialogues
-	var dialogueEntries []DialogueEntry
+	dialogueEntries := make([]DialogueEntry, 0, len(wfm.Dialogues))
 	for i, dialogue := range wfm.Dialogues {
 		// Process dialogue text using the new content-based structure
 		content, dialogueType, fontHeight, fontClut, terminator := processDialogueText(dialogue.Data, glyphMapping, wfm.Glyphs)
@@ -532,7 +534,7 @@ func (e *WFMFileExporter) parseSpecialDialogues(reservedData []byte, totalDialog
 
 		// Only include IDs that are within the valid range for dialogue IDs
 		// IDs should be between 0 and totalDialogues-1
-		if id < uint16(totalDialogues) {
+		if totalDialogues <= 65535 && id < uint16(totalDialogues) {
 			specialIDs = append(specialIDs, int(id))
 		} else {
 			common.LogWarn(common.WarnInvalidDialogueID, id, totalDialogues-1)
@@ -625,8 +627,10 @@ func (e *WFMFileExporter) buildGlyphMapping(glyphsDir, fontDir string) (map[uint
 
 		// Check if hash matches any font file
 		if charName, found := fontHashes[hash]; found {
-			mapping[uint16(glyphID)] = charName
-			common.LogDebug(common.DebugGlyphMapped, glyphID, charName)
+			if glyphID <= 65535 {
+				mapping[uint16(glyphID)] = charName
+				common.LogDebug(common.DebugGlyphMapped, glyphID, charName)
+			}
 		}
 	}
 
@@ -661,10 +665,19 @@ func (e *WFMFileExporter) calculateImageHash(imagePath string) (string, error) {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			r, g, b, a := img.At(x, y).RGBA()
 			// Write pixel data to hasher for consistent hash generation
-			binary.Write(hasher, binary.LittleEndian, uint16(r))
-			binary.Write(hasher, binary.LittleEndian, uint16(g))
-			binary.Write(hasher, binary.LittleEndian, uint16(b))
-			binary.Write(hasher, binary.LittleEndian, uint16(a))
+			// Color values from RGBA() are exactly in range 0-65535 (uint16 range), and &0xFFFF ensures safety
+			if err := binary.Write(hasher, binary.LittleEndian, uint16(r&0xFFFF)); err != nil { // Safe: r is 0-65535, &0xFFFF is redundant but explicit
+				return "", fmt.Errorf("failed to write red component to hasher: %w", err)
+			}
+			if err := binary.Write(hasher, binary.LittleEndian, uint16(g&0xFFFF)); err != nil { // Safe: g is 0-65535, &0xFFFF is redundant but explicit
+				return "", fmt.Errorf("failed to write green component to hasher: %w", err)
+			}
+			if err := binary.Write(hasher, binary.LittleEndian, uint16(b&0xFFFF)); err != nil { // Safe: b is 0-65535, &0xFFFF is redundant but explicit
+				return "", fmt.Errorf("failed to write blue component to hasher: %w", err)
+			}
+			if err := binary.Write(hasher, binary.LittleEndian, uint16(a&0xFFFF)); err != nil { // Safe: a is 0-65535, &0xFFFF is redundant but explicit
+				return "", fmt.Errorf("failed to write alpha component to hasher: %w", err)
+			}
 		}
 	}
 
@@ -686,7 +699,7 @@ func NewWFMProcessor() *WFMFileProcessor {
 }
 
 // Process handles the complete workflow of decoding and exporting a WFM file
-func (p *WFMFileProcessor) Process(inputFile string, outputDir string) error {
+func (p *WFMFileProcessor) Process(inputFile, outputDir string) error {
 	// Open input file
 	file, err := os.Open(inputFile)
 	if err != nil {
@@ -711,7 +724,7 @@ func (p *WFMFileProcessor) Process(inputFile string, outputDir string) error {
 	wfm.OriginalSize = originalSize
 
 	// Create output directory
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
+	if err := os.MkdirAll(outputDir, 0o750); err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
