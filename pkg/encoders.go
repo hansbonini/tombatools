@@ -1,3 +1,5 @@
+// Package pkg provides functionality for processing WFM font files from the Tomba! PlayStation game.
+// This file contains encoders for converting YAML dialogue files back to WFM format.
 package pkg
 
 import (
@@ -12,122 +14,132 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/hansbonini/tombatools/pkg/common"
 	"gopkg.in/yaml.v3"
 )
 
-// WFMFileEncoder implements the WFMEncoder interface
+// WFMFileEncoder implements the WFMEncoder interface and provides
+// functionality to encode YAML dialogue data back into WFM file format.
 type WFMFileEncoder struct {
-	originalSize int64 // Store original file size for padding
+	originalSize int64 // Store original file size for proper padding
 }
 
-// GlyphEncodeInfo holds information about a glyph and its assigned encode value
+// GlyphEncodeInfo holds information about a glyph and its assigned encode value.
+// This structure is used during the encoding process to map characters to glyph IDs.
 type GlyphEncodeInfo struct {
 	Character  rune
 	FontHeight int
 	Glyph      Glyph
 }
 
-// RecodedDialogue represents a dialogue with recoded text
+// RecodedDialogue represents a dialogue with recoded text for WFM encoding.
+// This structure contains both the original text and the encoded glyph sequence.
 type RecodedDialogue struct {
-	ID           int
-	Type         string
-	FontHeight   uint16
-	OriginalText string
-	EncodedText  []uint16
+	ID           int      // Dialogue identifier
+	Type         string   // Type of dialogue (event, dialogue, etc.)
+	FontHeight   uint16   // Font height used for this dialogue
+	OriginalText string   // Original text content
+	EncodedText  []uint16 // Encoded glyph IDs representing the text
 }
 
-// Encode creates a WFM file from a YAML dialogue file and associated glyph directory
+// Encode creates a WFM file from a YAML dialogue file and associated glyph directory.
+// This is the main entry point for converting YAML dialogue data back to WFM format.
+// Parameters:
+//   - yamlFile: Path to the YAML file containing dialogue data
+//   - outputFile: Path where the encoded WFM file will be written
+//
+// Returns an error if the encoding process fails.
 func (e *WFMFileEncoder) Encode(yamlFile string, outputFile string) error {
-	// Load dialogues from YAML
+	// Load dialogues from YAML file
 	dialogues, reservedData, err := e.LoadDialogues(yamlFile)
 	if err != nil {
-		return fmt.Errorf("failed to load dialogues: %w", err)
+		return common.FormatError(common.ErrFailedToLoadDialogues, err)
 	}
 
-	// Primeiro passo: fazer levantamento geral dos caracteres usados nos atributos text dos diálogos
+	// Step 1: Collect all unique characters used in dialogue text attributes
 	uniqueChars, unmappedBytes := e.collectUniqueCharacters(dialogues)
 
-	fmt.Printf("Levantamento de caracteres únicos encontrados:\n")
-	fmt.Printf("Total de caracteres únicos: %d\n", len(uniqueChars))
+	common.LogInfo("%s:", common.InfoUniqueCharactersFound)
+	common.LogInfo("%s: %d", common.InfoTotalUniqueCharacters, len(uniqueChars))
 
-	// Mostrar os caracteres ordenados
+	// Display characters in sorted order
 	for i, char := range uniqueChars {
-		fmt.Printf("Char %d: '%c' (U+%04X)\n", i, char, char)
+		common.LogDebug(common.DebugCharacterFound, i, char, char)
 	}
 
-	// Mostrar bytes sem mapeamento encontrados
+	// Display unmapped bytes found
 	if len(unmappedBytes) > 0 {
-		fmt.Printf("\nBytes sem mapeamento encontrados:\n")
-		fmt.Printf("Total de bytes sem mapeamento: %d\n", len(unmappedBytes))
+		common.LogInfo("\n%s:", common.InfoUnmappedBytesFound)
+		common.LogInfo("%s: %d", common.InfoTotalUnmappedBytes, len(unmappedBytes))
 		for i, unmappedByte := range unmappedBytes {
-			fmt.Printf("Unmapped %d: %s\n", i, unmappedByte)
+			common.LogDebug(common.DebugUnmappedByte, i, unmappedByte)
 		}
-		fmt.Printf("\nNota: Estes bytes precisam ser manualmente adicionados à fonte no futuro.\n")
+		common.LogInfo("\n%s", common.InfoNoteUnmappedBytes)
 	}
 
-	// Segundo passo: mapear glifos por diálogo considerando font_height
+	// Step 2: Map glyphs by dialogue considering font_height
 	glyphMap, err := e.mapGlyphsByDialogue(dialogues)
 	if err != nil {
-		return fmt.Errorf("failed to map glyphs: %w", err)
+		return common.FormatError(common.ErrFailedToMapGlyphs, err)
 	}
 
-	// Terceiro passo: atribuir valores de encode para cada glyph mapeado
+	// Step 3: Assign encode values for each mapped glyph
 	glyphEncodeMap, encodeValueMap, encodeOrder := e.assignEncodeValues(glyphMap)
 
-	fmt.Printf("\nMapeamento de glifos por altura de fonte:\n")
+	common.LogInfo("\n%s:", common.InfoGlyphMappingByHeight)
 	for fontHeight, glyphs := range glyphMap {
-		fmt.Printf("Font Height %d: %d glifos mapeados\n", fontHeight, len(glyphs))
+		common.LogDebug(common.DebugFontHeightGlyphs, fontHeight, len(glyphs))
 	}
 
-	fmt.Printf("\nValores de encode atribuídos (0x8000-0x%04X) na ordem de adição:\n", 0x8000+uint16(len(encodeValueMap))-1)
+	common.LogInfo("\n%s (0x8000-0x%04X) na ordem de adição:", common.InfoEncodeValuesAssigned, 0x8000+uint16(len(encodeValueMap))-1)
 
-	// Exibir na ordem em que foram adicionados
+	// Display in the order they were added
 	for _, encodeValue := range encodeOrder {
 		glyphInfo := encodeValueMap[encodeValue]
-		fmt.Printf("0x%04X -> '%c' (U+%04X) at font height %d\n", encodeValue, glyphInfo.Character, glyphInfo.Character, glyphInfo.FontHeight)
+		common.LogDebug(common.DebugEncodeValue, encodeValue, glyphInfo.Character, glyphInfo.Character, glyphInfo.FontHeight)
 	}
 
-	// Quarto passo: recodificar os textos dos diálogos usando o mapeamento
+	// Step 4: Re-encode dialogue texts using the mapping
 	recodedDialogues, err := e.recodeDialogueTexts(dialogues, glyphEncodeMap)
 	if err != nil {
-		return fmt.Errorf("failed to recode dialogue texts: %w", err)
+		return common.FormatError(common.ErrFailedToRecodeDialogues, err)
 	}
 
-	fmt.Printf("\nTextos recodificados:\n")
+	common.LogInfo("\n%s:", common.InfoRecodedTexts)
 	for i, dialogue := range recodedDialogues {
-		if i < 5 { // Mostrar apenas os primeiros 5 com mais detalhe
-			fmt.Printf("Dialogue %d ('%s'):\n", dialogue.ID, dialogue.OriginalText)
-			fmt.Printf("  Encoded: %s\n", e.formatEncodedText(dialogue.EncodedText))
-			fmt.Printf("  Length: %d bytes\n\n", len(dialogue.EncodedText)*2) // cada uint16 = 2 bytes
+		if i < 5 { // Show only the first 5 with more detail
+			common.LogDebug(common.DebugDialogueEncoded, dialogue.ID, dialogue.OriginalText)
+			common.LogDebug(common.DebugEncodedText, e.formatEncodedText(dialogue.EncodedText))
+			common.LogDebug(common.DebugEncodedLength, len(dialogue.EncodedText)*2) // cada uint16 = 2 bytes
 		}
 	}
 	if len(recodedDialogues) > 5 {
-		fmt.Printf("... e mais %d diálogos recodificados\n", len(recodedDialogues)-5)
+		common.LogDebug(common.DebugMoreDialogues, len(recodedDialogues)-5)
 	}
 
-	fmt.Printf("\nEstatísticas de recodificação:\n")
-	fmt.Printf("Total de diálogos processados: %d\n", len(recodedDialogues))
+	common.LogInfo("\n%s:", common.InfoRecodingStatistics)
+	common.LogInfo("%s: %d", common.InfoTotalDialoguesProcessed, len(recodedDialogues))
 
 	totalEncodedBytes := 0
 	for _, dialogue := range recodedDialogues {
-		totalEncodedBytes += len(dialogue.EncodedText) * 2 // cada uint16 = 2 bytes
+		totalEncodedBytes += len(dialogue.EncodedText) * 2 // each uint16 = 2 bytes
 	}
-	fmt.Printf("Total de bytes codificados: %d\n", totalEncodedBytes)
+	common.LogInfo("%s: %d", common.InfoTotalEncodedBytes, totalEncodedBytes)
 
-	// Quinto passo: montar o arquivo WFM final
+	// Step 5: Build the final WFM file
 	wfmFile, err := e.buildWFMFile(glyphMap, encodeValueMap, encodeOrder, recodedDialogues, reservedData)
 	if err != nil {
-		return fmt.Errorf("failed to build WFM file: %w", err)
+		return common.FormatError(common.ErrFailedToBuildWFM, err)
 	}
 
-	// Sexto passo: escrever o arquivo WFM
+	// Step 6: Write the WFM file
 	err = e.writeWFMFile(wfmFile, outputFile)
 	if err != nil {
-		return fmt.Errorf("failed to write WFM file: %w", err)
+		return common.FormatError(common.ErrFailedToWriteWFM, err)
 	}
 
-	fmt.Printf("\nArquivo WFM criado com sucesso: %s\n", outputFile)
-	fmt.Printf("Header: Magic=%s, Diálogos=%d, Glifos=%d\n",
+	common.LogInfo("\n%s: %s", common.InfoWFMFileCreated, outputFile)
+	common.LogDebug(common.DebugHeaderInfo,
 		string(wfmFile.Header.Magic[:]), wfmFile.Header.TotalDialogues, wfmFile.Header.TotalGlyphs)
 
 	return nil
@@ -137,7 +149,7 @@ func (e *WFMFileEncoder) Encode(yamlFile string, outputFile string) error {
 func (e *WFMFileEncoder) LoadDialogues(yamlFile string) ([]DialogueEntry, []byte, error) {
 	data, err := os.ReadFile(yamlFile)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read YAML file: %w", err)
+		return nil, nil, common.FormatError(common.ErrFailedToReadYAMLFile, err)
 	}
 
 	var yamlData struct {
@@ -147,7 +159,7 @@ func (e *WFMFileEncoder) LoadDialogues(yamlFile string) ([]DialogueEntry, []byte
 	}
 
 	if err := yaml.Unmarshal(data, &yamlData); err != nil {
-		return nil, nil, fmt.Errorf("failed to parse YAML: %w", err)
+		return nil, nil, common.FormatError(common.ErrFailedToParseYAML, err)
 	}
 
 	// Build reserved data based on special dialogues
@@ -174,7 +186,7 @@ func (e *WFMFileEncoder) buildReservedData(dialogues []DialogueEntry) []byte {
 
 	// If no special dialogues found, return zero-filled array
 	if len(specialDialogueIDs) == 0 {
-		fmt.Printf("No special dialogues found - Reserved section will be zero-filled (128 bytes)\n")
+		common.LogInfo("%s (128 bytes)", common.InfoNoSpecialDialogues)
 		return reservedData
 	}
 
@@ -188,7 +200,7 @@ func (e *WFMFileEncoder) buildReservedData(dialogues []DialogueEntry) []byte {
 
 	for i, id := range specialDialogueIDs {
 		if i >= maxEntries {
-			fmt.Printf("Warning: Too many special dialogues (%d), only first %d will be stored\n", len(specialDialogueIDs), maxEntries)
+			common.LogWarn(common.WarnTooManySpecialDialogues, len(specialDialogueIDs), maxEntries)
 			break
 		}
 
@@ -200,8 +212,8 @@ func (e *WFMFileEncoder) buildReservedData(dialogues []DialogueEntry) []byte {
 		}
 	}
 
-	fmt.Printf("Special dialogues found: %v\n", specialDialogueIDs)
-	fmt.Printf("Reserved section built with %d special dialogue IDs (128 bytes total)\n", len(specialDialogueIDs))
+	common.LogInfo("%s: %v", common.InfoSpecialDialoguesFound, specialDialogueIDs)
+	common.LogInfo("%s %d special dialogue IDs (128 bytes total)", common.InfoReservedSectionBuilt, len(specialDialogueIDs))
 
 	// Ensure we always return exactly 128 bytes
 	if len(reservedData) != 128 {
@@ -252,10 +264,10 @@ func (e *WFMFileEncoder) collectUniqueCharacters(dialogues []DialogueEntry) ([]r
 					// Remove bytes sem mapeamento como [8030], [8031], etc. (formato %04X)
 					cleanText = unmappedByteRegex.ReplaceAllString(cleanText, "")
 
-					// Remove quebras de linha que podem vir das tags
+					// Remove line breaks that may come from tags
 					cleanText = strings.ReplaceAll(cleanText, "\n", "")
 
-					// Agora conta apenas os caracteres reais que precisam de mapeamento
+					// Now count only the actual characters that need mapping
 					for _, char := range cleanText {
 						charSet[char] = true
 					}
@@ -305,7 +317,7 @@ func (e *WFMFileEncoder) mapGlyphsByDialogue(dialogues []DialogueEntry) (map[int
 		fontHeight := int(dialogue.FontHeight)
 		fontClut := dialogue.FontClut
 
-		// Inicializar o mapa para esta altura de fonte se não existir
+		// Initialize the map for this font height if it doesn't exist
 		if globalGlyphCache[fontHeight] == nil {
 			globalGlyphCache[fontHeight] = make(map[rune]Glyph)
 		}
@@ -314,7 +326,7 @@ func (e *WFMFileEncoder) mapGlyphsByDialogue(dialogues []DialogueEntry) (map[int
 		for _, contentItem := range dialogue.Content {
 			if textValue, exists := contentItem["text"]; exists {
 				if textStr, ok := textValue.(string); ok {
-					// Limpar o texto do diálogo
+					// Clean the dialogue text
 					cleanText := textStr
 
 					// Remove tags especiais conhecidas
@@ -325,23 +337,28 @@ func (e *WFMFileEncoder) mapGlyphsByDialogue(dialogues []DialogueEntry) (map[int
 					// Remove bytes sem mapeamento
 					cleanText = unmappedByteRegex.ReplaceAllString(cleanText, "")
 
-					// Remove quebras de linha
+					// Remove line breaks
 					cleanText = strings.ReplaceAll(cleanText, "\n", "")
 
-					// Processar cada caractere
+					// Process each character
 					for _, char := range cleanText {
-						// Verificar se o caractere já foi mapeado para esta altura de fonte
+						// Check if the character has already been mapped for this font height
 						if _, exists := globalGlyphCache[fontHeight][char]; !exists {
 							// Tentar carregar o glyph
 							glyph, err := e.loadSingleGlyph(char, fontHeight, fontClut)
 							if err != nil {
-								fmt.Printf("Warning: Could not load glyph for character '%c' (U+%04X) at font height %d: %v\n", char, char, fontHeight, err)
+								// Check if this is an ignored character
+								if char == '⧗' {
+									// Silently skip ignored characters
+									continue
+								}
+								common.LogWarn("%s '%c' (U+%04X) at font height %d: %v", common.WarnCouldNotLoadGlyph, char, char, fontHeight, err)
 								continue
 							}
 
 							// Armazenar no cache global
 							globalGlyphCache[fontHeight][char] = glyph
-							fmt.Printf("Loaded glyph for '%c' (U+%04X) at font height %d\n", char, char, fontHeight)
+							common.LogDebug(common.DebugGlyphLoaded, common.InfoGlyphLoaded, char, char, fontHeight)
 						}
 					}
 				}
@@ -380,8 +397,8 @@ func (e *WFMFileEncoder) assignEncodeValues(glyphMap map[int]map[rune]Glyph) (ma
 		}
 	}
 
-	// Ordenar por altura de fonte primeiro, depois por caractere
-	// Isso garante que glifos da mesma altura fiquem agrupados, mas cada char+altura é único
+	// Sort by font height first, then by character
+	// This ensures that glyphs of the same height are grouped, but each char+height is unique
 	sort.Slice(allGlyphKeys, func(i, j int) bool {
 		if allGlyphKeys[i].fontHeight != allGlyphKeys[j].fontHeight {
 			return allGlyphKeys[i].fontHeight < allGlyphKeys[j].fontHeight
@@ -395,15 +412,15 @@ func (e *WFMFileEncoder) assignEncodeValues(glyphMap map[int]map[rune]Glyph) (ma
 		char := key.char
 		glyph := glyphMap[fontHeight][char]
 
-		// Inicializar o mapa para esta altura de fonte se não existir
+		// Initialize the map for this font height if it doesn't exist
 		if glyphEncodeMap[fontHeight] == nil {
 			glyphEncodeMap[fontHeight] = make(map[rune]uint16)
 		}
 
-		// Atribuir o valor de encode (cada char+altura é tratado como glifo único)
+		// Assign the encode value (each char+height is treated as a unique glyph)
 		glyphEncodeMap[fontHeight][char] = currentEncodeValue
 
-		// Armazenar informações no mapa reverso
+		// Store information in the reverse map
 		encodeValueMap[currentEncodeValue] = GlyphEncodeInfo{
 			Character:  char,
 			FontHeight: fontHeight,
@@ -596,7 +613,7 @@ func (e *WFMFileEncoder) recodeDialogueTexts(dialogues []DialogueEntry, glyphEnc
 								possibleUnmapped := remainingText[:6]
 								if unmappedByteRegex.MatchString(possibleUnmapped) {
 									// Pular bytes sem mapeamento (não incluir no encode)
-									fmt.Printf("Warning: Skipping unmapped byte %s in dialogue %d\n", possibleUnmapped, dialogue.ID)
+									common.LogWarn("%s %s in dialogue %d", common.WarnSkippingUnmappedByte, possibleUnmapped, dialogue.ID)
 									i += 6
 									continue
 								}
@@ -645,7 +662,7 @@ func (e *WFMFileEncoder) recodeDialogueTexts(dialogues []DialogueEntry, glyphEnc
 							if encodeValue, exists := glyphEncodeMap[fontHeight][char]; exists {
 								encodedText = append(encodedText, encodeValue)
 							} else {
-								fmt.Printf("Warning: No encode mapping found for character '%c' (U+%04X) in dialogue %d\n", char, char, dialogue.ID)
+								common.LogWarn("%s '%c' (U+%04X) in dialogue %d", common.WarnNoEncodeMapping, char, char, dialogue.ID)
 							}
 
 							i++
@@ -800,14 +817,14 @@ func (e *WFMFileEncoder) buildWFMFile(glyphMap map[int]map[rune]Glyph, encodeVal
 	if len(reservedData) > 0 {
 		// Ensure reservedData is exactly 128 bytes
 		if len(reservedData) != 128 {
-			return nil, fmt.Errorf("reservedData must be exactly 128 bytes, got %d", len(reservedData))
+			return nil, common.FormatErrorString(common.ErrReservedDataSize, "got %d", len(reservedData))
 		}
 		// Use reserved data from special dialogues
 		copy(reservedBytes[:], reservedData)
 	}
 	// If reservedData is empty or nil, reservedBytes remains zero-filled
 
-	fmt.Printf("Reserved section: %d bytes used in header\n", len(reservedBytes))
+	common.LogInfo("%s: %d bytes", common.InfoReservedSectionUsed, len(reservedBytes))
 
 	header := WFMHeader{
 		Magic:                [4]byte{'W', 'F', 'M', '3'},
@@ -834,21 +851,21 @@ func (e *WFMFileEncoder) buildWFMFile(glyphMap map[int]map[rune]Glyph, encodeVal
 func (e *WFMFileEncoder) writeWFMFile(wfm *WFMFile, outputFile string) error {
 	file, err := os.Create(outputFile)
 	if err != nil {
-		return fmt.Errorf("failed to create output file: %w", err)
+		return common.FormatError(common.ErrFailedToCreateOutputFile, err)
 	}
 	defer file.Close()
 
 	// Escrever header
 	err = binary.Write(file, binary.LittleEndian, wfm.Header)
 	if err != nil {
-		return fmt.Errorf("failed to write header: %w", err)
+		return common.FormatError(common.ErrFailedToWriteHeader, err)
 	}
 
 	// Escrever tabela de ponteiros dos glifos
 	for _, pointer := range wfm.GlyphPointerTable {
 		err = binary.Write(file, binary.LittleEndian, pointer)
 		if err != nil {
-			return fmt.Errorf("failed to write glyph pointer: %w", err)
+			return common.FormatError(common.ErrFailedToWriteGlyphPointer, err)
 		}
 	}
 
@@ -857,28 +874,28 @@ func (e *WFMFileEncoder) writeWFMFile(wfm *WFMFile, outputFile string) error {
 		// Escrever atributos do glyph
 		err = binary.Write(file, binary.LittleEndian, glyph.GlyphClut)
 		if err != nil {
-			return fmt.Errorf("failed to write glyph clut: %w", err)
+			return common.FormatError(common.ErrFailedToWriteGlyphClut, err)
 		}
 
 		err = binary.Write(file, binary.LittleEndian, glyph.GlyphHeight)
 		if err != nil {
-			return fmt.Errorf("failed to write glyph height: %w", err)
+			return common.FormatError(common.ErrFailedToWriteGlyphHeight, err)
 		}
 
 		err = binary.Write(file, binary.LittleEndian, glyph.GlyphWidth)
 		if err != nil {
-			return fmt.Errorf("failed to write glyph width: %w", err)
+			return common.FormatError(common.ErrFailedToWriteGlyphWidth, err)
 		}
 
 		err = binary.Write(file, binary.LittleEndian, glyph.GlyphHandakuten)
 		if err != nil {
-			return fmt.Errorf("failed to write glyph handakuten: %w", err)
+			return common.FormatError(common.ErrFailedToWriteGlyphHandakuten, err)
 		}
 
 		// Escrever dados da imagem
 		_, err = file.Write(glyph.GlyphImage)
 		if err != nil {
-			return fmt.Errorf("failed to write glyph image: %w", err)
+			return common.FormatError(common.ErrFailedToWriteGlyphImage, err)
 		}
 
 		// Aplicar padding para garantir alinhamento de 2 bytes para cada glifo
@@ -889,7 +906,7 @@ func (e *WFMFileEncoder) writeWFMFile(wfm *WFMFile, outputFile string) error {
 			padding := make([]byte, paddingSize)
 			_, err = file.Write(padding)
 			if err != nil {
-				return fmt.Errorf("failed to write glyph padding: %w", err)
+				return common.FormatError(common.ErrFailedToWriteGlyphPadding, err)
 			}
 		}
 	}
@@ -898,7 +915,7 @@ func (e *WFMFileEncoder) writeWFMFile(wfm *WFMFile, outputFile string) error {
 	var currentPos int64
 	currentPos, err = file.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return fmt.Errorf("failed to get current file position: %w", err)
+		return common.FormatError(common.ErrFailedToGetFilePosition, err)
 	}
 
 	alignedPos := alignToBytes(uint32(currentPos), 2)
@@ -907,7 +924,7 @@ func (e *WFMFileEncoder) writeWFMFile(wfm *WFMFile, outputFile string) error {
 		padding := make([]byte, paddingForTable)
 		_, err = file.Write(padding)
 		if err != nil {
-			return fmt.Errorf("failed to write table alignment padding: %w", err)
+			return common.FormatError(common.ErrFailedToWritePadding, err)
 		}
 	}
 
@@ -915,7 +932,7 @@ func (e *WFMFileEncoder) writeWFMFile(wfm *WFMFile, outputFile string) error {
 	for _, pointer := range wfm.DialoguePointerTable {
 		err = binary.Write(file, binary.LittleEndian, pointer)
 		if err != nil {
-			return fmt.Errorf("failed to write dialogue pointer: %w", err)
+			return common.FormatError(common.ErrFailedToWriteDialoguePointer, err)
 		}
 	}
 
@@ -923,7 +940,7 @@ func (e *WFMFileEncoder) writeWFMFile(wfm *WFMFile, outputFile string) error {
 	for i, dialogue := range wfm.Dialogues {
 		_, err = file.Write(dialogue.Data)
 		if err != nil {
-			return fmt.Errorf("failed to write dialogue data: %w", err)
+			return common.FormatError(common.ErrFailedToWriteDialogueData, err)
 		}
 
 		// Aplicar padding para garantir alinhamento de 2 bytes para cada diálogo
@@ -934,7 +951,7 @@ func (e *WFMFileEncoder) writeWFMFile(wfm *WFMFile, outputFile string) error {
 			padding := make([]byte, paddingSize)
 			_, err = file.Write(padding)
 			if err != nil {
-				return fmt.Errorf("failed to write dialogue padding: %w", err)
+				return common.FormatError(common.ErrFailedToWriteDialoguePadding, err)
 			}
 		}
 	}
@@ -942,7 +959,7 @@ func (e *WFMFileEncoder) writeWFMFile(wfm *WFMFile, outputFile string) error {
 	// Get current file size and apply padding if necessary
 	currentPos, err = file.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return fmt.Errorf("failed to get current file position: %w", err)
+		return common.FormatError(common.ErrFailedToGetFilePosition, err)
 	}
 
 	// If we have an original size and current file is smaller, pad with 0xFF
@@ -956,14 +973,13 @@ func (e *WFMFileEncoder) writeWFMFile(wfm *WFMFile, outputFile string) error {
 
 		_, err = file.Write(padding)
 		if err != nil {
-			return fmt.Errorf("failed to write padding: %w", err)
+			return common.FormatError(common.ErrFailedToWritePadding, err)
 		}
 
-		fmt.Printf("Added %d bytes of 0xFF padding to maintain original file size (%d bytes)\n",
-			paddingSize, e.originalSize)
+		common.LogInfo("%s %d bytes of 0xFF padding to maintain original file size (%d bytes)",
+			common.InfoPaddingAdded, paddingSize, e.originalSize)
 	} else if e.originalSize > 0 && currentPos > e.originalSize {
-		fmt.Printf("Warning: Encoded file (%d bytes) is larger than original (%d bytes)\n",
-			currentPos, e.originalSize)
+		common.LogWarn(common.WarnEncodedFileLarger, currentPos, e.originalSize)
 	}
 
 	return nil
@@ -978,8 +994,13 @@ func (e *WFMFileEncoder) loadGlyphsForCharacters(characters []rune) ([]Glyph, er
 	for _, char := range characters {
 		glyph, err := e.loadSingleGlyph(char, fontHeight, defaultClut)
 		if err != nil {
+			// Check if this is an ignored character
+			if char == '⧗' {
+				// Silently skip ignored characters
+				continue
+			}
 			// Se não encontrar o glyph, log o erro mas continue
-			fmt.Printf("Warning: Could not load glyph for character '%c' (U+%04X): %v\n", char, char, err)
+			common.LogWarn("%s '%c' (U+%04X): %v", common.WarnCouldNotLoadGlyph, char, char, err)
 			continue
 		}
 		glyphs = append(glyphs, glyph)
@@ -990,6 +1011,11 @@ func (e *WFMFileEncoder) loadGlyphsForCharacters(characters []rune) ([]Glyph, er
 
 // loadSingleGlyph loads a single glyph from the fonts directory and converts it to 4bpp linear little endian
 func (e *WFMFileEncoder) loadSingleGlyph(char rune, fontHeight int, fontClut uint16) (Glyph, error) {
+	// Check for ignored characters first
+	if char == '⧗' { // U+29D7 - ignore this character
+		return Glyph{}, fmt.Errorf(common.ErrCharacterIgnoredNoGlyph)
+	}
+
 	// Determinar o caminho do arquivo PNG baseado no caractere
 	glyphPath, err := e.getGlyphPath(char, fontHeight)
 	if err != nil {
@@ -999,13 +1025,13 @@ func (e *WFMFileEncoder) loadSingleGlyph(char rune, fontHeight int, fontClut uin
 	// Carregar a imagem PNG
 	img, err := e.loadPNGImage(glyphPath)
 	if err != nil {
-		return Glyph{}, fmt.Errorf("failed to load PNG %s: %w", glyphPath, err)
+		return Glyph{}, common.FormatErrorString(common.ErrFailedToLoadPNG, "%s: %w", glyphPath, err)
 	}
 
 	// Converter para 4bpp linear little endian
 	imageData, err := e.convertTo4bppLinearLE(img, fontHeight)
 	if err != nil {
-		return Glyph{}, fmt.Errorf("failed to convert to 4bpp: %w", err)
+		return Glyph{}, common.FormatError(common.ErrFailedToConvertTo4bpp, err)
 	}
 
 	bounds := img.Bounds()
@@ -1022,6 +1048,11 @@ func (e *WFMFileEncoder) loadSingleGlyph(char rune, fontHeight int, fontClut uin
 
 // getGlyphPath determines the file path for a character's glyph PNG
 func (e *WFMFileEncoder) getGlyphPath(char rune, fontHeight int) (string, error) {
+	// Ignore the ⧗ character (U+29D7) - skip glyph loading for this character
+	if char == '⧗' { // U+29D7
+		return "", fmt.Errorf(common.ErrCharacterIgnored)
+	}
+
 	unicode := uint32(char)
 	filename := fmt.Sprintf("%04X.png", unicode)
 
@@ -1043,7 +1074,7 @@ func (e *WFMFileEncoder) getGlyphPath(char rune, fontHeight int) (string, error)
 		}
 	}
 
-	return "", fmt.Errorf("glyph file not found for character '%c' (U+%04X)", char, char)
+	return "", common.FormatErrorString(common.ErrGlyphFileNotFound, "'%c' (U+%04X)", char, char)
 }
 
 // loadPNGImage loads a PNG image from file

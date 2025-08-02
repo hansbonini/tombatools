@@ -1,7 +1,6 @@
-/*
-Copyright © 2025 NAME HERE <EMAIL ADDRESS>
-
-*/
+// Package cmd provides command-line interface functionality for TombaTools.
+// TombaTools is a collection of utilities for extracting and modifying
+// game files from Tomba! (Ore no Tomba) for PlayStation.
 package cmd
 
 import (
@@ -10,25 +9,26 @@ import (
 	"github.com/spf13/cobra"
 )
 
-
-
-// rootCmd represents the base command when called without any subcommands
+// rootCmd represents the base command when called without any subcommands.
+// It provides the main entry point for the TombaTools application.
 var rootCmd = &cobra.Command{
 	Use:   "tombatools",
-	Short: "A brief description of your application",
-	Long: `A longer description that spans multiple lines and likely contains
-examples and usage of using your application. For example:
+	Short: "Tools for modding Tomba! PSX game files",
+	Long: `TombaTools - A collection of utilities for extracting and modifying 
+game files from Tomba! (Ore no Tomba) for PlayStation.
 
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
-	// Uncomment the following line if your bare application
-	// has an action associated with it:
-	// Run: func(cmd *cobra.Command, args []string) { },
+Currently supports:
+  - WFM font files (extract/create glyphs and dialogues)
+
+Examples:
+  tombatools wfm decode CFNT999H.WFM ./output/
+  tombatools wfm encode dialogues.yaml CFNT999H_modified.WFM
+
+Use 'tombatools [command] --help' for more information about a command.`,
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
-// This is called by main.main(). It only needs to happen once to the rootCmd.
+// This is called by main.main() and serves as the entry point for command execution.
 func Execute() {
 	err := rootCmd.Execute()
 	if err != nil {
@@ -36,16 +36,11 @@ func Execute() {
 	}
 }
 
+// init initializes the root command with flags and configuration settings.
 func init() {
-	// Here you will define your flags and configuration settings.
-	// Cobra supports persistent flags, which, if defined here,
-	// will be global for your application.
+	// Note: Persistent flags defined here would be global for the entire application.
+	// Local flags only run when this specific command is called directly.
 
-	// rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.tombatools.yaml)")
-
-	// Cobra also supports local flags, which will only run
-	// when this action is called directly.
+	// Example toggle flag (can be removed if not needed)
 	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }
-
-

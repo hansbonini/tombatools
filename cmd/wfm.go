@@ -1,6 +1,6 @@
-/*
-Copyright © 2025 NAME HERE <EMAIL ADDRESS>
-*/
+// Package cmd provides command-line interface for WFM file processing.
+// This file contains commands for decoding and encoding WFM font files
+// used in the Tomba! PlayStation game.
 package cmd
 
 import (
@@ -8,35 +8,39 @@ import (
 	"path/filepath"
 
 	"github.com/hansbonini/tombatools/pkg"
+	"github.com/hansbonini/tombatools/pkg/common"
 	"github.com/spf13/cobra"
 )
 
-// wfmCmd represents the wfm command
+// wfmCmd represents the parent command for all WFM file operations.
+// It provides access to both decode and encode subcommands for processing
+// WFM font files from the Tomba! PlayStation game.
 var wfmCmd = &cobra.Command{
 	Use:   "wfm",
-	Short: "Process WFM font files",
+	Short: "Process WFM font files from Tomba! PSX game",
 	Long: `Process WFM font files used in Tomba! PSX game.
-	
-Available subcommands:
-- decode: Extract data from WFM files (glyphs, dialogues)
-- encode: Create WFM files from extracted data (coming soon)
+
+Commands:
+  decode    Extract glyphs (PNG) and dialogues (YAML) from WFM files
+  encode    Create WFM files from YAML dialogues and font PNG files
 
 Examples:
   tombatools wfm decode CFNT999H.WFM ./output/
-  tombatools wfm encode ./input/ output.wfm`,
+  tombatools wfm encode dialogues.yaml output.wfm`,
 }
 
-// wfmDecodeCmd represents the wfm decode command
+// wfmDecodeCmd extracts glyphs and dialogues from WFM font files.
+// It parses the WFM file structure and exports individual glyph PNG files
+// and a YAML file containing dialogue data with automatic text decoding.
 var wfmDecodeCmd = &cobra.Command{
 	Use:   "decode [input_file] [output_directory]",
-	Short: "Extract data from WFM font files",
-	Long: `Extract data from WFM font files used in Tomba! PSX game.
-	
-This command will:
-- Parse the WFM file structure
-- Extract glyph data to PNG files
-- Extract dialogue data to YAML file with font height information
-- Generate glyph mapping for text decoding
+	Short: "Extract glyphs and dialogues from WFM files",
+	Long: `Extract glyphs and dialogues from WFM font files.
+
+Output:
+  - Individual glyph PNG files in ./glyphs/
+  - Dialogue YAML file with decoded text and metadata
+  - Automatic glyph-to-character mapping (if fonts/ directory exists)
 
 Example:
   tombatools wfm decode CFNT999H.WFM ./output/`,
@@ -45,10 +49,14 @@ Example:
 		inputFile := args[0]
 		outputDir := args[1]
 
-		// Create WFM processor
+		// Enable verbose mode if requested
+		verbose, _ := cmd.Flags().GetBool("verbose")
+		common.SetVerboseMode(verbose)
+
+		// Create WFM processor for handling decode operations
 		processor := pkg.NewWFMProcessor()
 
-		// Process the file
+		// Process the WFM file: decode structure and export data
 		fmt.Printf("Processing WFM file: %s\n", inputFile)
 		fmt.Printf("Output directory: %s\n", outputDir)
 
@@ -56,6 +64,7 @@ Example:
 			return fmt.Errorf("failed to process WFM file: %w", err)
 		}
 
+		// Display success message with output locations
 		fmt.Println("WFM file processed successfully!")
 		fmt.Printf("- Individual glyph PNG files saved to: %s\n", filepath.Join(outputDir, "glyphs"))
 		fmt.Printf("- Dialogues extracted to: %s\n", filepath.Join(outputDir, "dialogues.yaml"))
@@ -64,31 +73,39 @@ Example:
 	},
 }
 
-// wfmEncodeCmd represents the wfm encode command
+// wfmEncodeCmd creates WFM font files from YAML dialogue data and PNG font files.
+// It reads dialogue data from a YAML file and corresponding PNG glyph files
+// to generate a complete WFM file ready for use in the Tomba! game.
 var wfmEncodeCmd = &cobra.Command{
 	Use:   "encode dialogue.yaml [output_file]",
-	Short: "Create WFM font files from extracted data",
-	Long: `Create WFM font files from extracted data (PNG glyphs and YAML dialogues).
-	
-This command will:
-- Read dialogue data from YAML file
-- Read PNG glyph files from the proper font directory based on font height
-- Generate a WFM file with the correct structure
+	Short: "Create WFM files from YAML dialogues",
+	Long: `Create WFM font files from YAML dialogue data and PNG font files.
+
+Requirements:
+  - YAML file with dialogue data (from decode command)
+  - fonts/ directory with character PNG files (8/, 16/, 24/ subdirectories)
+
+Output:
+  - Complete WFM file ready for use in Tomba! PSX game
 
 Example:
-  tombatools wfm encode dialogue.yaml output.wfm`,
+  tombatools wfm encode dialogues.yaml CFNT999H_modified.WFM`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		inputFile := args[0]
 		outputFile := args[1]
 
+		// Enable verbose mode if requested
+		verbose, _ := cmd.Flags().GetBool("verbose")
+		common.SetVerboseMode(verbose)
+
 		fmt.Printf("Input file: %s\n", inputFile)
 		fmt.Printf("Output WFM file: %s\n", outputFile)
 
-		// Create WFM encoder
+		// Create WFM encoder for handling encode operations
 		encoder := pkg.NewWFMEncoder()
 
-		// Encode the YAML file to WFM
+		// Encode the YAML file to WFM format
 		if err := encoder.Encode(inputFile, outputFile); err != nil {
 			return fmt.Errorf("failed to encode WFM file: %w", err)
 		}
@@ -98,20 +115,18 @@ Example:
 	},
 }
 
+// init initializes the WFM command and its subcommands with appropriate flags.
 func init() {
+	// Register the WFM command with the root command
 	rootCmd.AddCommand(wfmCmd)
 
-	// Add subcommands to wfm
+	// Add subcommands to the WFM command
 	wfmCmd.AddCommand(wfmDecodeCmd)
 	wfmCmd.AddCommand(wfmEncodeCmd)
 
-	// Here you will define your flags and configuration settings.
+	// Add verbose flag to decode command for detailed output
+	wfmDecodeCmd.Flags().BoolP("verbose", "v", false, "Enable verbose output (show debug messages)")
 
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// wfmCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// wfmCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	// Add verbose flag to encode command for detailed output
+	wfmEncodeCmd.Flags().BoolP("verbose", "v", false, "Enable verbose output (show debug messages)")
 }

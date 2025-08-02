@@ -32,7 +32,8 @@ const (
 	GLYPH_ID_BASE = 0x8000
 )
 
-// Default CLUT palettes for glyphs (converted from byte arrays to uint16)
+// Default CLUT (Color Look-Up Table) palettes for glyph rendering
+// Each palette contains 16 colors in PlayStation PSX 15-bit format
 var DialogueClut = [16]uint16{
 	0x0000, 0x0400, 0x4E73, 0x2529,
 	0x35AD, 0x4210, 0x14A5, 0x7E4D,
@@ -102,25 +103,14 @@ type DialogueEntry struct {
 	Content    []map[string]interface{} `yaml:"content"`
 }
 
-// Legacy DialogueEntry for backward compatibility during migration
-type LegacyDialogueEntry struct {
-	ID         int    `yaml:"id"`
-	Type       string `yaml:"type"`
-	BoxWidth   *int   `yaml:"box_width,omitempty"`
-	BoxHeight  *int   `yaml:"box_height,omitempty"`
-	FontHeight int    `yaml:"font_height"`
-	FontClut   uint16 `yaml:"font_clut"`
-	Text       string `yaml:"text"`
-}
-
-// WFMHeader represents the main header of a WFM file
+// WFMHeader represents the main header of a WFM file structure
 type WFMHeader struct {
 	Magic                [4]byte // Always "WFM3"
 	Padding              uint32
 	DialoguePointerTable uint32
 	TotalDialogues       uint16
 	TotalGlyphs          uint16
-	Reserved             [128]byte // Skip next 128 bytes
+	Reserved             [128]byte // Reserved section (may contain special dialogue IDs)
 }
 
 // Glyph represents the data for a single glyph

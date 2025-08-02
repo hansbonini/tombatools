@@ -1,24 +1,35 @@
+// Package pkg provides functionality for processing WFM font files from the Tomba! PlayStation game.
+// This file contains decoders for reading and parsing WFM file structures and data.
 package pkg
 
 import (
 	"encoding/binary"
 	"fmt"
 	"io"
+
+	"github.com/hansbonini/tombatools/pkg/common"
 )
 
-// WFMFileDecoder implements the WFMDecoder interface
+// WFMFileDecoder implements the WFMDecoder interface and provides
+// functionality to decode WFM files into structured data.
 type WFMFileDecoder struct{}
 
-// NewWFMDecoder creates a new WFM decoder instance
+// NewWFMDecoder creates a new WFM decoder instance.
+// Returns a pointer to a WFMFileDecoder ready for parsing WFM files.
 func NewWFMDecoder() *WFMFileDecoder {
 	return &WFMFileDecoder{}
 }
 
-// Decode reads and parses a complete WFM file
+// Decode reads and parses a complete WFM file from the provided reader.
+// This is the main entry point for WFM file parsing, handling header, glyphs, and dialogues.
+// Parameters:
+//   - reader: io.Reader containing WFM file data to decode
+//
+// Returns a pointer to the decoded WFMFile structure, or an error if parsing fails.
 func (d *WFMFileDecoder) Decode(reader io.Reader) (*WFMFile, error) {
 	wfm := &WFMFile{}
 
-	// Decode header
+	// Decode the WFM file header first
 	header, err := d.DecodeHeader(reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode header: %w", err)
@@ -44,11 +55,17 @@ func (d *WFMFileDecoder) Decode(reader io.Reader) (*WFMFile, error) {
 	return wfm, nil
 }
 
-// DecodeHeader reads and validates the WFM header
+// DecodeHeader reads and parses the WFM file header structure.
+// The header contains metadata about the file including magic signature,
+// dialogue counts, glyph information, and pointer tables.
+// Parameters:
+//   - reader: io.Reader positioned at the start of the WFM file
+//
+// Returns a pointer to the decoded WFMHeader structure, or an error if parsing fails.
 func (d *WFMFileDecoder) DecodeHeader(reader io.Reader) (*WFMHeader, error) {
 	header := &WFMHeader{}
 
-	// Read magic header
+	// Read and validate magic header signature
 	if err := binary.Read(reader, binary.LittleEndian, &header.Magic); err != nil {
 		return nil, fmt.Errorf("failed to read magic header: %w", err)
 	}
@@ -67,7 +84,7 @@ func (d *WFMFileDecoder) DecodeHeader(reader io.Reader) (*WFMHeader, error) {
 	if err := binary.Read(reader, binary.LittleEndian, &header.DialoguePointerTable); err != nil {
 		return nil, fmt.Errorf("failed to read dialogue pointer table: %w", err)
 	}
-	fmt.Printf("Header DialoguePointerTable offset: %d (0x%X)\n", header.DialoguePointerTable, header.DialoguePointerTable)
+	common.LogDebug(common.DebugHeaderPointerTable, header.DialoguePointerTable, header.DialoguePointerTable)
 
 	// Read total dialogs count
 	if err := binary.Read(reader, binary.LittleEndian, &header.TotalDialogues); err != nil {
@@ -103,7 +120,7 @@ func (d *WFMFileDecoder) DecodeGlyphs(reader io.Reader, header *WFMHeader) ([]ui
 	// Since we don't have the exact specification, we'll read what we can
 	for i := uint16(0); i < header.TotalGlyphs; i++ {
 		glyph := Glyph{}
-		
+
 		// Try to read glyph structure: GlyphClut, GlyphHeight, GlyphWidth, GlyphHandakuten
 		if err := binary.Read(reader, binary.LittleEndian, &glyph.GlyphClut); err != nil {
 			// If we can't read the structure, create empty glyph
@@ -125,10 +142,10 @@ func (d *WFMFileDecoder) DecodeGlyphs(reader io.Reader, header *WFMHeader) ([]ui
 			if err := binary.Read(reader, binary.LittleEndian, &glyph.GlyphHandakuten); err != nil {
 				glyph.GlyphHandakuten = 0
 			}
-			
+
 			// Calculate expected image size (4bpp = 4 bits per pixel = 0.5 bytes per pixel)
 			if glyph.GlyphWidth > 0 && glyph.GlyphHeight > 0 {
-				imageSize := (int(glyph.GlyphWidth) * int(glyph.GlyphHeight) + 1) / 2
+				imageSize := (int(glyph.GlyphWidth)*int(glyph.GlyphHeight) + 1) / 2
 				if imageSize > 0 && imageSize < 10000 { // Reasonable size limit
 					glyph.GlyphImage = make([]byte, imageSize)
 					if _, err := io.ReadFull(reader, glyph.GlyphImage); err != nil {
@@ -137,7 +154,7 @@ func (d *WFMFileDecoder) DecodeGlyphs(reader io.Reader, header *WFMHeader) ([]ui
 				}
 			}
 		}
-		
+
 		glyphs[i] = glyph
 	}
 
@@ -149,7 +166,7 @@ func (d *WFMFileDecoder) DecodeDialogues(reader io.Reader, header *WFMHeader) ([
 	dialoguePointers := make([]uint16, header.TotalDialogues)
 	dialogues := make([]Dialogue, header.TotalDialogues)
 
-	fmt.Printf("Reading %d dialogue pointers starting from current position\n", header.TotalDialogues)
+	common.LogDebug(common.DebugReadingDialoguePointers, header.TotalDialogues)
 
 	// Read dialog pointer table
 	for i := uint16(0); i < header.TotalDialogues; i++ {
@@ -157,7 +174,7 @@ func (d *WFMFileDecoder) DecodeDialogues(reader io.Reader, header *WFMHeader) ([
 			return nil, nil, fmt.Errorf("failed to read dialog pointer %d: %w", i, err)
 		}
 		if i < 10 { // Show first 10 pointers for debugging
-			fmt.Printf("Dialogue pointer %d: %d (0x%X)\n", i, dialoguePointers[i], dialoguePointers[i])
+			common.LogDebug(common.DebugDialoguePointer, i, dialoguePointers[i], dialoguePointers[i])
 		}
 	}
 
@@ -167,7 +184,7 @@ func (d *WFMFileDecoder) DecodeDialogues(reader io.Reader, header *WFMHeader) ([
 	// Read dialogue data using pointers
 	for i := uint16(0); i < header.TotalDialogues; i++ {
 		pointer := dialoguePointers[i]
-		
+
 		// Skip null pointers
 		if pointer == 0 {
 			dialogues[i] = Dialogue{Data: []byte{}}
@@ -176,13 +193,13 @@ func (d *WFMFileDecoder) DecodeDialogues(reader io.Reader, header *WFMHeader) ([
 
 		// Calculate absolute offset: base address + relative pointer
 		absoluteOffset := dialogueTableStart + int64(pointer)
-		
+
 		// Create a seeker from the reader if possible
 		if seeker, ok := reader.(io.ReadSeeker); ok {
 			// Seek to dialogue position
 			_, err := seeker.Seek(absoluteOffset, io.SeekStart)
 			if err != nil {
-				fmt.Printf("Warning: Could not seek to dialogue %d at offset %d: %v\n", i, absoluteOffset, err)
+				common.LogWarn(common.WarnSeekToDialogue, i, absoluteOffset, err)
 				dialogues[i] = Dialogue{Data: []byte{}}
 				continue
 			}
@@ -194,17 +211,17 @@ func (d *WFMFileDecoder) DecodeDialogues(reader io.Reader, header *WFMHeader) ([
 				if err := binary.Read(reader, binary.LittleEndian, &word); err != nil {
 					break // End of file or read error
 				}
-				
+
 				// Check for terminator
 				if word == 0xFFFF {
 					break
 				}
-				
+
 				// Add word to dialogue data (little endian)
 				dialogueData = append(dialogueData, byte(word&0xFF))
 				dialogueData = append(dialogueData, byte((word>>8)&0xFF))
 			}
-			
+
 			dialogues[i] = Dialogue{Data: dialogueData}
 		} else {
 			// If we can't seek, create empty dialogue

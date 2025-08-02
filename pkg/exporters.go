@@ -1,3 +1,5 @@
+// Package pkg provides functionality for processing WFM font files from the Tomba! PlayStation game.
+// This file contains exporters for converting WFM data to PNG images and YAML dialogue files.
 package pkg
 
 import (
@@ -13,20 +15,30 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hansbonini/tombatools/pkg/common"
 	"gopkg.in/yaml.v3"
 )
 
-// WFMFileExporter implements the WFMExporter interface
+// WFMFileExporter implements the WFMExporter interface and provides
+// functionality to export WFM data to external formats (PNG, YAML).
 type WFMFileExporter struct{}
 
-// NewWFMExporter creates a new WFM exporter instance
+// NewWFMExporter creates a new WFM exporter instance.
+// Returns a pointer to a WFMFileExporter ready for use.
 func NewWFMExporter() *WFMFileExporter {
 	return &WFMFileExporter{}
 }
 
-// ExportGlyphs exports each glyph as an individual PNG file
+// ExportGlyphs exports each glyph as an individual PNG file.
+// This function processes all glyphs in the WFM file and creates separate PNG images
+// for each glyph in a "glyphs" subdirectory within the output directory.
+// Parameters:
+//   - wfm: The WFM file containing glyph data to export
+//   - outputDir: Base directory path where the "glyphs" subdirectory will be created
+//
+// Returns an error if the export operation fails (directory creation, file writing, etc.).
 func (e *WFMFileExporter) ExportGlyphs(wfm *WFMFile, outputDir string) error {
-	// Create glyphs subdirectory
+	// Create glyphs subdirectory for organizing exported glyph images
 	glyphsDir := filepath.Join(outputDir, "glyphs")
 	if err := os.MkdirAll(glyphsDir, 0755); err != nil {
 		return fmt.Errorf("failed to create glyphs directory: %w", err)
@@ -55,7 +67,7 @@ func (e *WFMFileExporter) ExportGlyphs(wfm *WFMFile, outputDir string) error {
 	for glyphIndex, glyph := range wfm.Glyphs {
 		// Skip invalid glyphs
 		if len(glyph.GlyphImage) == 0 || glyph.GlyphWidth == 0 || glyph.GlyphHeight == 0 {
-			fmt.Printf("Skipping glyph %d: invalid dimensions or empty image data\n", glyphIndex)
+			common.LogDebug(common.DebugGlyphSkipped, glyphIndex)
 			continue
 		}
 
@@ -115,13 +127,13 @@ func (e *WFMFileExporter) ExportGlyphs(wfm *WFMFile, outputDir string) error {
 		}
 		file.Close()
 
-		fmt.Printf("Exported glyph %d: %dx%d pixels (CLUT: %d, Handakuten: %d) -> %s\n",
+		common.LogDebug(common.DebugGlyphExported,
 			glyphIndex, glyph.GlyphWidth, glyph.GlyphHeight,
 			glyph.GlyphClut, glyph.GlyphHandakuten, filename)
 		exportedCount++
 	}
 
-	fmt.Printf("Successfully exported %d individual glyph PNG files to: %s\n", exportedCount, glyphsDir)
+	common.LogInfo(common.InfoGlyphsExported, exportedCount, glyphsDir)
 	return nil
 }
 
@@ -390,7 +402,14 @@ func getSpecialCharacterCode(code uint16) string {
 	}
 }
 
-// ExportDialogues exports dialogues as a single YAML file with text decoding
+// ExportDialogues exports all dialogue entries from a WFM file to a YAML file.
+// This function processes dialogue data, extracts text content with special control codes,
+// and exports it as a structured YAML file with metadata.
+// Parameters:
+//   - wfm: The WFM file containing dialogue data to export
+//   - outputDir: Directory path where the "dialogues.yaml" file will be created
+//
+// Returns an error if the export operation fails (file creation, encoding, etc.).
 func (e *WFMFileExporter) ExportDialogues(wfm *WFMFile, outputDir string) error {
 	// Validate that we have the expected number of dialogues
 	expectedDialogues := int(wfm.Header.TotalDialogues)
@@ -399,13 +418,13 @@ func (e *WFMFileExporter) ExportDialogues(wfm *WFMFile, outputDir string) error 
 		return fmt.Errorf("dialogue count mismatch: expected %d, got %d", expectedDialogues, actualDialogues)
 	}
 
-	// Build glyph hash to character mapping from font files
+	// Build glyph hash to character mapping from font files for text decoding
 	glyphsDir := filepath.Join(outputDir, "glyphs")
 	fontDir := "fonts" // User should have a 'fonts' directory with character-named PNG files
 	glyphMapping, err := e.buildGlyphMapping(glyphsDir, fontDir)
 	if err != nil {
-		fmt.Printf("Warning: Could not build glyph mapping from font directory: %v\n", err)
-		fmt.Printf("Dialogues will be exported without text decoding\n")
+		common.LogWarn(common.WarnCouldNotBuildGlyphMapping, err)
+		common.LogWarn(common.WarnDialoguesWithoutDecoding)
 	}
 
 	// Process each dialogue using data already extracted in DecodeDialogues
@@ -444,7 +463,7 @@ func (e *WFMFileExporter) ExportDialogues(wfm *WFMFile, outputDir string) error 
 		for _, specialID := range specialDialogueIDs {
 			if dialogueEntries[i].ID == specialID {
 				dialogueEntries[i].Special = true
-				fmt.Printf("Marked dialogue %d as special\n", specialID)
+				common.LogDebug(common.DebugDialogueMarkedSpecial, specialID)
 				break
 			}
 		}
@@ -472,20 +491,27 @@ func (e *WFMFileExporter) ExportDialogues(wfm *WFMFile, outputDir string) error 
 		return fmt.Errorf("failed to encode YAML: %w", err)
 	}
 
-	fmt.Printf("Exported %d dialogues to YAML: %s\n", len(dialogueEntries), yamlFile)
+	common.LogInfo(common.InfoDialoguesExported, len(dialogueEntries), yamlFile)
 	return nil
 }
 
-// parseSpecialDialogues extracts special dialogue IDs from the Reserved section
+// parseSpecialDialogues extracts special dialogue IDs from the Reserved section.
+// Special dialogues are marked differently in the WFM file structure and require
+// special handling during export and import operations.
+// Parameters:
+//   - reservedData: Byte array from the WFM header's Reserved section
+//   - totalDialogues: Total number of dialogues expected in the file
+//
+// Returns a slice of dialogue IDs that are marked as special.
 func (e *WFMFileExporter) parseSpecialDialogues(reservedData []byte, totalDialogues int) []int {
 	var specialIDs []int
 
-	// Debug: show first 32 bytes of Reserved section
-	fmt.Printf("Reserved section debug (first 32 bytes): ")
+	// Debug: show first 32 bytes of Reserved section for analysis
+	debugOutput := ""
 	for i := 0; i < 32 && i < len(reservedData); i++ {
-		fmt.Printf("%02X ", reservedData[i])
+		debugOutput += fmt.Sprintf(common.DebugReservedSectionHex, reservedData[i])
 	}
-	fmt.Printf("\n")
+	common.LogDebug(common.DebugReservedSectionBytes + debugOutput)
 
 	// Check if all 128 bytes are zero - if so, no special dialogues exist
 	allZero := true
@@ -497,7 +523,7 @@ func (e *WFMFileExporter) parseSpecialDialogues(reservedData []byte, totalDialog
 	}
 
 	if allZero {
-		fmt.Printf("All Reserved section bytes are zero - no special dialogues in file\n")
+		common.LogInfo(common.InfoNoSpecialDialoguesInFile)
 		return specialIDs
 	}
 
@@ -514,7 +540,7 @@ func (e *WFMFileExporter) parseSpecialDialogues(reservedData []byte, totalDialog
 	// If first ID is 0 and there are non-zero values after, include dialogue 0 as special
 	if firstID == 0 && hasNonZeroAfterFirst {
 		specialIDs = append(specialIDs, 0)
-		fmt.Printf("First ID is 0 with non-zero values after - including dialogue 0 as special\n")
+		common.LogDebug(common.DebugDialogueZeroIncluded)
 	}
 
 	// Parse uint16 IDs stored in little endian format
@@ -532,24 +558,31 @@ func (e *WFMFileExporter) parseSpecialDialogues(reservedData []byte, totalDialog
 		if id < uint16(totalDialogues) {
 			specialIDs = append(specialIDs, int(id))
 		} else {
-			fmt.Printf("Warning: Found invalid dialogue ID %d in Reserved section (max valid ID: %d)\n", id, totalDialogues-1)
+			common.LogWarn(common.WarnInvalidDialogueID, id, totalDialogues-1)
 		}
 	}
 
 	if len(specialIDs) > 0 {
-		fmt.Printf("Detected special dialogues from Reserved section: %v\n", specialIDs)
+		common.LogInfo(common.InfoSpecialDialoguesDetected, specialIDs)
 	} else {
-		fmt.Printf("No valid special dialogue IDs found in Reserved section\n")
+		common.LogInfo(common.InfoNoValidSpecialDialogues)
 	}
 
 	return specialIDs
 }
 
-// buildGlyphMapping creates a mapping from glyph ID to character by comparing glyph images
+// buildGlyphMapping creates a mapping from glyph ID to character by comparing glyph images.
+// This function analyzes exported glyph images and matches them against reference font files
+// to establish character mappings for text decoding in dialogues.
+// Parameters:
+//   - glyphsDir: Directory containing exported glyph PNG files
+//   - fontDir: Directory containing reference font PNG files organized by character
+//
+// Returns a map from glyph ID to character string, or an error if mapping fails.
 func (e *WFMFileExporter) buildGlyphMapping(glyphsDir, fontDir string) (map[uint16]string, error) {
 	mapping := make(map[uint16]string)
 
-	// Check if font directory exists
+	// Check if font directory exists before proceeding
 	if _, err := os.Stat(fontDir); os.IsNotExist(err) {
 		return nil, fmt.Errorf("font directory '%s' does not exist", fontDir)
 	}
@@ -616,15 +649,21 @@ func (e *WFMFileExporter) buildGlyphMapping(glyphsDir, fontDir string) (map[uint
 		// Check if hash matches any font file
 		if charName, found := fontHashes[hash]; found {
 			mapping[uint16(glyphID)] = charName
-			fmt.Printf("Mapped glyph %d to character '%s'\n", glyphID, charName)
+			common.LogDebug(common.DebugGlyphMapped, glyphID, charName)
 		}
 	}
 
-	fmt.Printf("Built glyph mapping: %d glyphs mapped to characters\n", len(mapping))
+	common.LogInfo(common.InfoGlyphMappingBuilt, len(mapping))
 	return mapping, nil
 }
 
-// calculateImageHash calculates a simple hash of an image file for comparison
+// calculateImageHash calculates a SHA256 hash of an image file for comparison.
+// This function loads a PNG image and generates a hash based on its pixel content,
+// which is used to match glyph images against reference font files.
+// Parameters:
+//   - imagePath: Path to the PNG image file to hash
+//
+// Returns the hexadecimal hash string, or an error if the operation fails.
 func (e *WFMFileExporter) calculateImageHash(imagePath string) (string, error) {
 	file, err := os.Open(imagePath)
 	if err != nil {
@@ -637,14 +676,14 @@ func (e *WFMFileExporter) calculateImageHash(imagePath string) (string, error) {
 		return "", err
 	}
 
-	// Calculate hash based on image content
+	// Calculate hash based on image pixel content
 	hasher := sha256.New()
 	bounds := img.Bounds()
 
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			r, g, b, a := img.At(x, y).RGBA()
-			// Write pixel data to hasher
+			// Write pixel data to hasher for consistent hash generation
 			binary.Write(hasher, binary.LittleEndian, uint16(r))
 			binary.Write(hasher, binary.LittleEndian, uint16(g))
 			binary.Write(hasher, binary.LittleEndian, uint16(b))
