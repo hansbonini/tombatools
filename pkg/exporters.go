@@ -709,7 +709,11 @@ func (e *WFMFileExporter) parseDialogueIDs(reservedData []byte, totalDialogues i
 
 // isValidDialogueID checks if a dialogue ID is within valid range
 func (e *WFMFileExporter) isValidDialogueID(id uint16, totalDialogues int) bool {
-	return totalDialogues <= 65535 && id < uint16(totalDialogues)
+	safeTotal, err := common.SafeIntToUint16(totalDialogues)
+	if err != nil {
+		return false
+	}
+	return id < safeTotal
 }
 
 // logSpecialDialogueResults logs the results of special dialogue parsing
@@ -837,7 +841,11 @@ func (e *WFMFileExporter) processGlyphFile(glyphFile string, fontHashes map[stri
 	}
 
 	if charName, found := fontHashes[hash]; found && extractedGlyphID <= 65535 {
-		return uint16(extractedGlyphID), charName, true
+		safeGlyphID, err := common.SafeIntToUint16(extractedGlyphID)
+		if err != nil {
+			return 0, "", false
+		}
+		return safeGlyphID, charName, true
 	}
 
 	return 0, "", false
@@ -880,17 +888,33 @@ func (e *WFMFileExporter) calculateImageHash(imagePath string) (string, error) {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			r, g, b, a := img.At(x, y).RGBA()
 			// Write pixel data to hasher for consistent hash generation
-			// Color values from RGBA() are exactly in range 0-65535 (uint16 range), and &0xFFFF ensures safety
-			if err := binary.Write(hasher, binary.LittleEndian, uint16(r&0xFFFF)); err != nil { // Safe: r is 0-65535, &0xFFFF is redundant but explicit
+			// Color values from RGBA() are exactly in range 0-65535 (uint16 range), safe conversion
+			rSafe, err := common.SafeUint32ToUint16(r)
+			if err != nil {
+				return "", fmt.Errorf("failed to convert red component: %w", err)
+			}
+			if err := binary.Write(hasher, binary.LittleEndian, rSafe); err != nil {
 				return "", fmt.Errorf("failed to write red component to hasher: %w", err)
 			}
-			if err := binary.Write(hasher, binary.LittleEndian, uint16(g&0xFFFF)); err != nil { // Safe: g is 0-65535, &0xFFFF is redundant but explicit
+			gSafe, err := common.SafeUint32ToUint16(g)
+			if err != nil {
+				return "", fmt.Errorf("failed to convert green component: %w", err)
+			}
+			if err := binary.Write(hasher, binary.LittleEndian, gSafe); err != nil {
 				return "", fmt.Errorf("failed to write green component to hasher: %w", err)
 			}
-			if err := binary.Write(hasher, binary.LittleEndian, uint16(b&0xFFFF)); err != nil { // Safe: b is 0-65535, &0xFFFF is redundant but explicit
+			bSafe, err := common.SafeUint32ToUint16(b)
+			if err != nil {
+				return "", fmt.Errorf("failed to convert blue component: %w", err)
+			}
+			if err := binary.Write(hasher, binary.LittleEndian, bSafe); err != nil {
 				return "", fmt.Errorf("failed to write blue component to hasher: %w", err)
 			}
-			if err := binary.Write(hasher, binary.LittleEndian, uint16(a&0xFFFF)); err != nil { // Safe: a is 0-65535, &0xFFFF is redundant but explicit
+			aSafe, err := common.SafeUint32ToUint16(a)
+			if err != nil {
+				return "", fmt.Errorf("failed to convert alpha component: %w", err)
+			}
+			if err := binary.Write(hasher, binary.LittleEndian, aSafe); err != nil {
 				return "", fmt.Errorf("failed to write alpha component to hasher: %w", err)
 			}
 		}

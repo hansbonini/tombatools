@@ -563,10 +563,15 @@ func (e *WFMFileEncoder) recodeDialogue(dialogue DialogueEntry, glyphEncodeMap m
 	terminatorHex := e.getTerminatorHex(dialogue.Terminator)
 	encodedText = append(encodedText, terminatorHex)
 
+	safeFontHeight, err := common.SafeIntToUint16(dialogue.FontHeight)
+	if err != nil {
+		return RecodedDialogue{}, fmt.Errorf("invalid font height %d: %w", dialogue.FontHeight, err)
+	}
+
 	recodedDialogue := RecodedDialogue{
 		ID:           dialogue.ID,
 		Type:         dialogue.Type,
-		FontHeight:   uint16(dialogue.FontHeight), // Safe: dialogue.FontHeight is already int, and we validate ranges elsewhere
+		FontHeight:   safeFontHeight,
 		OriginalText: fullOriginalText.String(),
 		EncodedText:  encodedText,
 	}
@@ -1077,7 +1082,10 @@ func (e *WFMFileEncoder) calculateGlyphPointers(glyphs []Glyph) ([]uint16, error
 	if len(glyphs) > (1<<31-1)/2 {
 		return nil, fmt.Errorf("too many glyphs: %d", len(glyphs))
 	}
-	glyphTableSize := uint32(len(glyphs) * 2)         // Size of glyph pointer table
+	glyphTableSize, err := common.SafeIntToUint32(len(glyphs) * 2)
+	if err != nil {
+		return nil, fmt.Errorf("glyph table size calculation failed: %w", err)
+	}
 	currentGlyphOffset := headerSize + glyphTableSize // Start of glyph data
 
 	for _, glyph := range glyphs {
@@ -1093,7 +1101,11 @@ func (e *WFMFileEncoder) calculateGlyphPointers(glyphs []Glyph) ([]uint16, error
 		if glyphSize > (1<<31-1) || len(glyph.GlyphImage) > (1<<31-1)-8 {
 			return nil, fmt.Errorf("glyph image too large: %d bytes", len(glyph.GlyphImage))
 		}
-		currentGlyphOffset += uint32(glyphSize) // Safe: checked above
+		safeGlyphSize, err := common.SafeIntToUint32(glyphSize)
+		if err != nil {
+			return nil, fmt.Errorf("glyph size conversion failed: %w", err)
+		}
+		currentGlyphOffset += safeGlyphSize
 	}
 
 	return glyphPointerTable, nil
@@ -1106,7 +1118,11 @@ func (e *WFMFileEncoder) calculateDialoguePointers(dialogues []Dialogue) ([]uint
 	if len(dialogues) > 32767 {
 		return nil, fmt.Errorf("too many dialogues: %d", len(dialogues))
 	}
-	currentDialogueOffset := uint16(len(dialogues) * 2) // Size of pointer table, safe: checked above
+	safeDialogueOffset, err := common.SafeIntToUint16(len(dialogues) * 2)
+	if err != nil {
+		return nil, fmt.Errorf("dialogue offset calculation failed: %w", err)
+	}
+	currentDialogueOffset := safeDialogueOffset // Size of pointer table, safe: checked above
 
 	// Ensure dialogue data is byte-aligned (2-byte alignment)
 	currentDialogueOffset = alignToBytes16(currentDialogueOffset, 2)
@@ -1117,7 +1133,11 @@ func (e *WFMFileEncoder) calculateDialoguePointers(dialogues []Dialogue) ([]uint
 		if len(dialogue.Data) > 65535 {
 			return nil, fmt.Errorf("dialogue data too large: %d bytes", len(dialogue.Data))
 		}
-		dialogueSize := uint16(len(dialogue.Data)) // Safe: checked above
+		safeDialogueSize, err := common.SafeIntToUint16(len(dialogue.Data))
+		if err != nil {
+			return nil, fmt.Errorf("dialogue size conversion failed: %w", err)
+		}
+		dialogueSize := safeDialogueSize
 		// Ensure each dialogue is byte-aligned
 		alignedDialogueSize := alignToBytes16(dialogueSize, 2)
 		currentDialogueOffset += alignedDialogueSize
@@ -1129,7 +1149,11 @@ func (e *WFMFileEncoder) calculateDialoguePointers(dialogues []Dialogue) ([]uint
 // calculateDialoguePointerTableOffset calculates position of dialogue pointer table
 func (e *WFMFileEncoder) calculateDialoguePointerTableOffset(glyphs []Glyph) (uint32, error) {
 	headerSize := uint32(4 + 4 + 4 + 2 + 2 + 128) // Magic + Padding + DialoguePointerTable + TotalDialogues + TotalGlyphs + Reserved
-	glyphTableSize := uint32(len(glyphs) * 2)     // Size of glyph pointer table
+	safeGlyphTableSize, err := common.SafeIntToUint32(len(glyphs) * 2)
+	if err != nil {
+		return 0, fmt.Errorf("glyph table size calculation failed: %w", err)
+	}
+	glyphTableSize := safeGlyphTableSize // Size of glyph pointer table
 
 	totalGlyphsSize := uint32(0)
 	for _, glyph := range glyphs {
@@ -1137,7 +1161,11 @@ func (e *WFMFileEncoder) calculateDialoguePointerTableOffset(glyphs []Glyph) (ui
 		if len(glyph.GlyphImage) > (1<<31-1)-8 {
 			return 0, fmt.Errorf("glyph image too large: %d bytes", len(glyph.GlyphImage))
 		}
-		glyphSize := uint32(8 + len(glyph.GlyphImage)) // Safe: checked above
+		safeGlyphSize, err := common.SafeIntToUint32(8 + len(glyph.GlyphImage))
+		if err != nil {
+			return 0, fmt.Errorf("glyph size calculation failed: %w", err)
+		}
+		glyphSize := safeGlyphSize
 		// Ensure each glyph is byte-aligned
 		alignedGlyphSize := alignToBytes(glyphSize, 2)
 		totalGlyphsSize += alignedGlyphSize
@@ -1165,12 +1193,21 @@ func (e *WFMFileEncoder) buildHeader(dialogues []Dialogue, glyphs []Glyph, dialo
 
 	common.LogInfo("%s: %d bytes", common.InfoReservedSectionUsed, len(reservedBytes))
 
+	safeTotalDialogues, err := common.SafeIntToUint16(len(dialogues))
+	if err != nil {
+		return WFMHeader{}, fmt.Errorf("total dialogues conversion failed: %w", err)
+	}
+	safeTotalGlyphs, err := common.SafeIntToUint16(len(glyphs))
+	if err != nil {
+		return WFMHeader{}, fmt.Errorf("total glyphs conversion failed: %w", err)
+	}
+
 	header := WFMHeader{
 		Magic:                [4]byte{'W', 'F', 'M', '3'},
 		Padding:              0,
 		DialoguePointerTable: dialoguePointerTableOffset,
-		TotalDialogues:       uint16(len(dialogues)), // Safe: checked above that len(dialogues) <= 32767
-		TotalGlyphs:          uint16(len(glyphs)),    // Safe: checked above that len(glyphs) is reasonable
+		TotalDialogues:       safeTotalDialogues,
+		TotalGlyphs:          safeTotalGlyphs,
 		Reserved:             reservedBytes,
 	}
 
@@ -1284,7 +1321,11 @@ func (e *WFMFileEncoder) writeSingleGlyph(file *os.File, glyph Glyph) error {
 // applyGlyphPadding applies padding for glyph alignment
 func (e *WFMFileEncoder) applyGlyphPadding(file *os.File, glyph Glyph) error {
 	// Safe conversion: ensure glyph image size doesn't cause overflow (already validated in buildWFMFile)
-	glyphSize := uint32(8 + len(glyph.GlyphImage)) // Safe: validated in buildWFMFile
+	safeGlyphSize, err := common.SafeIntToUint32(8 + len(glyph.GlyphImage))
+	if err != nil {
+		return fmt.Errorf("glyph size conversion failed: %w", err)
+	}
+	glyphSize := safeGlyphSize
 	alignedGlyphSize := alignToBytes(glyphSize, 2)
 	paddingSize := alignedGlyphSize - glyphSize
 	if paddingSize > 0 {
@@ -1307,8 +1348,12 @@ func (e *WFMFileEncoder) ensureDialogueAlignment(file *os.File) error {
 	if currentPos > (1<<32 - 1) {
 		return common.FormatError(common.ErrFailedToGetFilePosition, fmt.Errorf("file too large: %d bytes", currentPos))
 	}
-	alignedPos := alignToBytes(uint32(currentPos), 2)  // Safe: checked above
-	paddingForTable := alignedPos - uint32(currentPos) // Safe: checked above
+	safeCurrentPos, err := common.SafeInt64ToUint32(currentPos)
+	if err != nil {
+		return common.FormatError(common.ErrFailedToGetFilePosition, fmt.Errorf("file position conversion failed: %w", err))
+	}
+	alignedPos := alignToBytes(safeCurrentPos, 2)
+	paddingForTable := alignedPos - safeCurrentPos
 	if paddingForTable > 0 {
 		padding := make([]byte, paddingForTable)
 		if _, err := file.Write(padding); err != nil {
@@ -1347,7 +1392,11 @@ func (e *WFMFileEncoder) writeDialogues(file *os.File, dialogues []Dialogue) err
 // applyDialoguePadding applies padding for dialogue alignment
 func (e *WFMFileEncoder) applyDialoguePadding(file *os.File, dialogue Dialogue, index, total int) error {
 	// Safe conversion: dialogue data size already validated in buildWFMFile
-	dialogueSize := uint16(len(dialogue.Data)) // Safe: validated in buildWFMFile
+	safeDialogueSize, err := common.SafeIntToUint16(len(dialogue.Data))
+	if err != nil {
+		return fmt.Errorf("dialogue size conversion failed: %w", err)
+	}
+	dialogueSize := safeDialogueSize
 	alignedDialogueSize := alignToBytes16(dialogueSize, 2)
 	paddingSize := alignedDialogueSize - dialogueSize
 	if paddingSize > 0 && index < total-1 { // Don't apply padding to the last dialogue
@@ -1435,12 +1484,21 @@ func (e *WFMFileEncoder) loadSingleGlyph(char rune, fontHeight int, fontClut uin
 		return Glyph{}, fmt.Errorf("invalid glyph width: %d", width)
 	}
 
+	safeHeight, err := common.SafeIntToUint16(height)
+	if err != nil {
+		return Glyph{}, fmt.Errorf("glyph height conversion failed: %w", err)
+	}
+	safeWidth, err := common.SafeIntToUint16(width)
+	if err != nil {
+		return Glyph{}, fmt.Errorf("glyph width conversion failed: %w", err)
+	}
+
 	glyph := Glyph{
 		GlyphClut:       fontClut,
-		GlyphHeight:     uint16(height), // Safe: validated above
-		GlyphWidth:      uint16(width),  // Safe: validated above
-		GlyphHandakuten: 0,              // TODO: implement if necessary
-		GlyphImage:      tile.Data,      // Use tile data from PSX processor
+		GlyphHeight:     safeHeight,
+		GlyphWidth:      safeWidth,
+		GlyphHandakuten: 0,         // TODO: implement if necessary
+		GlyphImage:      tile.Data, // Use tile data from PSX processor
 	}
 
 	return glyph, nil

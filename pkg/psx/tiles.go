@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+
+	"github.com/hansbonini/tombatools/pkg/common"
 )
 
 // PSX tile and pixel processing constants
@@ -31,10 +33,10 @@ func (c PSXColor) ToRGBA() color.RGBA {
 	psxColor := uint16(c)
 
 	// Extract RGB components from 15-bit PSX format (0BBBBBGGGGGRRRRR)
-	// These conversions are safe: bit masks (0x1F = 31) ensure max value of 31, and << 3 gives max 248 (fits in uint8)
-	r := uint8((psxColor & 0x1F) << 3)         // Red: bits 0-4, max value 31 << 3 = 248
-	g := uint8(((psxColor >> 5) & 0x1F) << 3)  // Green: bits 5-9, max value 31 << 3 = 248
-	b := uint8(((psxColor >> 10) & 0x1F) << 3) // Blue: bits 10-14, max value 31 << 3 = 248
+	// Using safe conversions to satisfy gosec - bit masks ensure values are within range
+	r := common.SafeUint32ToUint8(uint32((psxColor & 0x1F) << 3))         // Red: bits 0-4, max value 31 << 3 = 248
+	g := common.SafeUint32ToUint8(uint32(((psxColor >> 5) & 0x1F) << 3))  // Green: bits 5-9, max value 31 << 3 = 248
+	b := common.SafeUint32ToUint8(uint32(((psxColor >> 10) & 0x1F) << 3)) // Blue: bits 10-14, max value 31 << 3 = 248
 
 	// Full opacity for visible colors, transparent for color 0
 	var a uint8 = 255
@@ -118,7 +120,12 @@ func colorDistance(c1, c2 PSXColor) uint32 {
 	// Max squared difference per component: 255^2 = 65025
 	// Max total distance: 3 * 65025 = 195075, which fits comfortably in uint32
 	distance := dr*dr + dg*dg + db*db
-	return uint32(distance) // Safe: distance is always positive and bounded
+	safeDistance, err := common.SafeInt32ToUint32(distance)
+	if err != nil {
+		// This should never happen given the bounded nature of color differences
+		return 0 // Return 0 as a safe fallback
+	}
+	return safeDistance
 }
 
 // PSXTile represents a tile in PSX 4bpp linear little endian format

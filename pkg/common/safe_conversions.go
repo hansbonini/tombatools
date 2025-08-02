@@ -59,3 +59,11 @@ func SafeUint32ToUint8(value uint32) uint8 {
 	}
 	return uint8(value)
 }
+
+// SafeInt32ToUint32 safely converts int32 to uint32 with bounds checking
+func SafeInt32ToUint32(value int32) (uint32, error) {
+	if value < 0 {
+		return 0, fmt.Errorf("value %d is negative, cannot convert to uint32", value)
+	}
+	return uint32(value), nil
+}
