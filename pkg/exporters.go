@@ -411,11 +411,12 @@ func (p *dialogueTextProcessor) handleRegularGlyph(glyphID uint16) {
 // handleSpecialGlyphID handles special glyph IDs
 func (p *dialogueTextProcessor) handleSpecialGlyphID(glyphID uint16) {
 	// Special handling for special commands
-	if glyphID == C04D {
+	switch glyphID {
+	case C04D:
 		p.currentText += TriangleDown
-	} else if glyphID == C04E {
+	case C04E:
 		p.currentText += TriangleRight
-	} else {
+	default:
 		p.currentText += fmt.Sprintf("[%04X]", glyphID)
 	}
 }
