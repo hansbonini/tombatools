@@ -157,7 +157,7 @@ type DialoguesYAML struct {
 }
 
 // processDialogueText processes dialogue text using the new content-based structure
-func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs []Glyph) (content []map[string]interface{}, entryType string, fontHeight int, fontClut uint16, terminator uint16) {
+func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs []Glyph) (content []map[string]interface{}, entryType string, fontHeight int, fontClut, terminator uint16) {
 	processor := &dialogueTextProcessor{
 		content:            make([]map[string]interface{}, 0),
 		currentText:        "",

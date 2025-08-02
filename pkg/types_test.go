@@ -127,6 +127,10 @@ func TestDialogueEntry(t *testing.T) {
 	if dialogue.Special != false {
 		t.Errorf("DialogueEntry.Special = %t, want false", dialogue.Special)
 	}
+
+	if len(dialogue.Content) != 0 {
+		t.Errorf("len(DialogueEntry.Content) = %d, want 0", len(dialogue.Content))
+	}
 }
 
 func TestWFMHeader(t *testing.T) {
@@ -141,6 +145,10 @@ func TestWFMHeader(t *testing.T) {
 	expectedMagic := [4]byte{'W', 'F', 'M', '3'}
 	if header.Magic != expectedMagic {
 		t.Errorf("WFMHeader.Magic = %v, want %v", header.Magic, expectedMagic)
+	}
+
+	if header.Padding != 0 {
+		t.Errorf("WFMHeader.Padding = %d, want 0", header.Padding)
 	}
 
 	if header.DialoguePointerTable != 0x1000 {
@@ -241,6 +249,14 @@ func TestWFMFile(t *testing.T) {
 
 	if len(wfm.GlyphPointerTable) != 3 {
 		t.Errorf("len(WFMFile.GlyphPointerTable) = %d, want 3", len(wfm.GlyphPointerTable))
+	}
+
+	if wfm.Header.TotalDialogues != 2 {
+		t.Errorf("WFMFile.Header.TotalDialogues = %d, want 2", wfm.Header.TotalDialogues)
+	}
+
+	if wfm.Header.TotalGlyphs != 3 {
+		t.Errorf("WFMFile.Header.TotalGlyphs = %d, want 3", wfm.Header.TotalGlyphs)
 	}
 
 	if len(wfm.Glyphs) != 3 {
