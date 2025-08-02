@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"image"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -37,82 +38,114 @@ func NewWFMExporter() *WFMFileExporter {
 //
 // Returns an error if the export operation fails (directory creation, file writing, etc.).
 func (e *WFMFileExporter) ExportGlyphs(wfm *WFMFile, outputDir string) error {
-	// Create glyphs subdirectory for organizing exported glyph images
 	glyphsDir := filepath.Join(outputDir, "glyphs")
 	if err := os.MkdirAll(glyphsDir, 0o750); err != nil {
 		return fmt.Errorf("failed to create glyphs directory: %w", err)
 	}
 
-	// Validate that we have the expected number of glyphs
+	if err := e.validateGlyphCount(wfm); err != nil {
+		return err
+	}
+
+	exportedCount := e.exportAllGlyphs(wfm, glyphsDir)
+	common.LogInfo(common.InfoGlyphsExported, exportedCount, glyphsDir)
+	return nil
+}
+
+// validateGlyphCount validates that the expected number of glyphs matches actual count
+func (e *WFMFileExporter) validateGlyphCount(wfm *WFMFile) error {
 	expectedGlyphs := int(wfm.Header.TotalGlyphs)
 	actualGlyphs := len(wfm.Glyphs)
 	if actualGlyphs != expectedGlyphs {
 		return fmt.Errorf("glyph count mismatch: expected %d, got %d", expectedGlyphs, actualGlyphs)
 	}
+	return nil
+}
 
-	// Process each glyph and export as PNG
-
-	// Process each glyph individually
+// exportAllGlyphs exports all valid glyphs and returns the count of exported glyphs
+func (e *WFMFileExporter) exportAllGlyphs(wfm *WFMFile, glyphsDir string) int {
 	exportedCount := 0
+
 	for glyphIndex, glyph := range wfm.Glyphs {
-		// Skip invalid glyphs
-		if len(glyph.GlyphImage) == 0 || glyph.GlyphWidth == 0 || glyph.GlyphHeight == 0 {
-			common.LogDebug(common.DebugGlyphSkipped, glyphIndex)
-			continue
+		if e.exportSingleGlyph(glyphIndex, glyph, glyphsDir) {
+			exportedCount++
 		}
-
-		width := int(glyph.GlyphWidth)
-		height := int(glyph.GlyphHeight)
-
-		// Select the correct palette based on GlyphHeight
-		var palette psx.PSXPalette
-		if glyph.GlyphHeight == 24 {
-			// Use EventClut for glyphs with height 24
-			palette = psx.NewPSXPalette(EventClut)
-		} else {
-			// Use DialogueClut for all other heights
-			palette = psx.NewPSXPalette(DialogueClut)
-		}
-
-		// Create PSX tile from glyph data
-		tile := &psx.PSXTile{
-			Width:   width,
-			Height:  height,
-			Data:    glyph.GlyphImage,
-			Palette: palette,
-		}
-
-		// Convert tile to image using PSX tile processor
-		processor := psx.NewPSXTileProcessor()
-		glyphImg, err := processor.ConvertFromTile(tile)
-		if err != nil {
-			common.LogWarn("Failed to convert glyph %d to image: %v", glyphIndex, err)
-			continue
-		}
-
-		// Save individual PNG file
-		filename := fmt.Sprintf("glyph_%04d.png", glyphIndex)
-		pngFile := filepath.Join(glyphsDir, filename)
-		file, err := os.Create(pngFile)
-		if err != nil {
-			return fmt.Errorf("failed to create PNG file for glyph %d: %w", glyphIndex, err)
-		}
-
-		if err := png.Encode(file, glyphImg); err != nil {
-			_ = file.Close() // Ignore close error, encode error is more important
-			return fmt.Errorf("failed to encode PNG for glyph %d: %w", glyphIndex, err)
-		}
-		if err := file.Close(); err != nil {
-			return fmt.Errorf("failed to close PNG file for glyph %d: %w", glyphIndex, err)
-		}
-
-		common.LogDebug(common.DebugGlyphExported,
-			glyphIndex, glyph.GlyphWidth, glyph.GlyphHeight,
-			glyph.GlyphClut, glyph.GlyphHandakuten, filename)
-		exportedCount++
 	}
 
-	common.LogInfo(common.InfoGlyphsExported, exportedCount, glyphsDir)
+	return exportedCount
+}
+
+// exportSingleGlyph exports a single glyph as PNG and returns true if successful
+func (e *WFMFileExporter) exportSingleGlyph(glyphIndex int, glyph Glyph, glyphsDir string) bool {
+	// Skip invalid glyphs
+	if !e.isValidGlyph(glyph) {
+		common.LogDebug(common.DebugGlyphSkipped, glyphIndex)
+		return false
+	}
+
+	glyphImg, err := e.convertGlyphToImage(glyph)
+	if err != nil {
+		common.LogWarn("Failed to convert glyph %d to image: %v", glyphIndex, err)
+		return false
+	}
+
+	filename := fmt.Sprintf("glyph_%04d.png", glyphIndex)
+	if err := e.saveGlyphImage(glyphImg, glyphsDir, filename, glyphIndex); err != nil {
+		return false
+	}
+
+	common.LogDebug(common.DebugGlyphExported,
+		glyphIndex, glyph.GlyphWidth, glyph.GlyphHeight,
+		glyph.GlyphClut, glyph.GlyphHandakuten, filename)
+	return true
+}
+
+// isValidGlyph checks if a glyph has valid data for export
+func (e *WFMFileExporter) isValidGlyph(glyph Glyph) bool {
+	return len(glyph.GlyphImage) > 0 && glyph.GlyphWidth > 0 && glyph.GlyphHeight > 0
+}
+
+// convertGlyphToImage converts glyph data to image
+func (e *WFMFileExporter) convertGlyphToImage(glyph Glyph) (image.Image, error) {
+	width := int(glyph.GlyphWidth)
+	height := int(glyph.GlyphHeight)
+
+	palette := e.selectPalette(glyph)
+
+	tile := &psx.PSXTile{
+		Width:   width,
+		Height:  height,
+		Data:    glyph.GlyphImage,
+		Palette: palette,
+	}
+
+	processor := psx.NewPSXTileProcessor()
+	return processor.ConvertFromTile(tile)
+}
+
+// selectPalette selects the appropriate palette based on glyph height
+func (e *WFMFileExporter) selectPalette(glyph Glyph) psx.PSXPalette {
+	if glyph.GlyphHeight == 24 {
+		// Use EventClut for glyphs with height 24
+		return psx.NewPSXPalette(EventClut)
+	}
+	// Use DialogueClut for all other heights
+	return psx.NewPSXPalette(DialogueClut)
+}
+
+// saveGlyphImage saves the glyph image as PNG file
+func (e *WFMFileExporter) saveGlyphImage(glyphImg image.Image, glyphsDir, filename string, glyphIndex int) error {
+	pngFile := filepath.Join(glyphsDir, filename)
+	file, err := os.Create(pngFile)
+	if err != nil {
+		return fmt.Errorf("failed to create PNG file for glyph %d: %w", glyphIndex, err)
+	}
+	defer file.Close()
+
+	if err := png.Encode(file, glyphImg); err != nil {
+		return fmt.Errorf("failed to encode PNG for glyph %d: %w", glyphIndex, err)
+	}
+
 	return nil
 }
 
@@ -125,24 +158,45 @@ type DialoguesYAML struct {
 
 // processDialogueText processes dialogue text using the new content-based structure
 func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs []Glyph) ([]map[string]interface{}, string, int, uint16, uint16) {
-	var content []map[string]interface{}
-	var currentText string
-	entryType := "event"          // Default to event type
-	detectedFontHeight := 8       // Default to 8, will be updated when we find actual glyphs
-	detectedFontClut := uint16(0) // Default CLUT
-
-	// Function to add current text to content if it exists
-	addTextContent := func() {
-		if currentText != "" {
-			content = append(content, map[string]interface{}{
-				"text": currentText,
-			})
-			currentText = ""
-		}
+	processor := &dialogueTextProcessor{
+		content:            make([]map[string]interface{}, 0),
+		currentText:        "",
+		entryType:          "event",
+		detectedFontHeight: 8,
+		detectedFontClut:   0,
+		terminator:         0xFFFF,
+		glyphMapping:       glyphMapping,
+		glyphs:             glyphs,
 	}
 
-	var terminator uint16 = 0xFFFF // Default terminator
+	processor.processRawData(rawData)
+	return processor.content, processor.entryType, processor.detectedFontHeight, processor.detectedFontClut, processor.terminator
+}
 
+// dialogueTextProcessor handles dialogue text processing
+type dialogueTextProcessor struct {
+	content            []map[string]interface{}
+	currentText        string
+	entryType          string
+	detectedFontHeight int
+	detectedFontClut   uint16
+	terminator         uint16
+	glyphMapping       map[uint16]string
+	glyphs             []Glyph
+}
+
+// addTextContent adds current text to content if it exists
+func (p *dialogueTextProcessor) addTextContent() {
+	if p.currentText != "" {
+		p.content = append(p.content, map[string]interface{}{
+			"text": p.currentText,
+		})
+		p.currentText = ""
+	}
+}
+
+// processRawData processes the raw dialogue data
+func (p *dialogueTextProcessor) processRawData(rawData []byte) {
 	// Process dialogue data in 2-byte chunks
 	for i := 0; i+1 < len(rawData); i += 2 {
 		// Read 2 bytes as little endian uint16
@@ -150,214 +204,283 @@ func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs 
 
 		// Check for termination
 		if glyphID == 0xFFFF || glyphID == 0xFFFE {
-			terminator = glyphID
+			p.terminator = glyphID
 			break
 		}
 
-		// Handle [INIT TEXT BOX] with width and height parameters
-		if glyphID == INIT_TEXT_BOX { // [INIT TEXT BOX]
-			entryType = "dialogue" // Set type to dialogue when INIT TEXT BOX is found
-			// Next 2 bytes are width
-			if i+4 <= len(rawData) {
-				width := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
-				// Next 2 bytes are height
-				if i+6 <= len(rawData) {
-					height := int(binary.LittleEndian.Uint16(rawData[i+4 : i+6]))
-					content = append(content, map[string]interface{}{
-						"box": map[string]interface{}{
-							"width":  width,
-							"height": height,
-						},
-					})
-					i += 4 // Skip both width and height bytes
-				} else {
-					i += 2 // Skip only width bytes
-				}
-			}
-			continue
-		}
-
-		// Handle INIT_TAIL with width and height parameters
-		if glyphID == INIT_TAIL {
-			// Add current text before adding tail
-			addTextContent()
-			// Next 2 bytes are width
-			if i+4 <= len(rawData) {
-				width := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
-				// Next 2 bytes are height
-				if i+6 <= len(rawData) {
-					height := int(binary.LittleEndian.Uint16(rawData[i+4 : i+6]))
-					content = append(content, map[string]interface{}{
-						"tail": map[string]interface{}{
-							"width":  width,
-							"height": height,
-						},
-					})
-					i += 4 // Skip both width and height bytes
-				} else {
-					i += 2 // Skip only width bytes
-				}
-			}
-			continue
-		}
-
-		// Handle F6 command with width and height parameters
-		if glyphID == F6 {
-			// Add current text before adding f6
-			addTextContent()
-			// Next 2 bytes are width
-			if i+4 <= len(rawData) {
-				width := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
-				// Next 2 bytes are height
-				if i+6 <= len(rawData) {
-					height := int(binary.LittleEndian.Uint16(rawData[i+4 : i+6]))
-					content = append(content, map[string]interface{}{
-						"f6": map[string]interface{}{
-							"width":  width,
-							"height": height,
-						},
-					})
-					i += 4 // Skip both width and height bytes
-				} else {
-					i += 2 // Skip only width bytes
-				}
-			}
-			continue
-		}
-
-		// Handle CHANGE_COLOR_TO
-		if glyphID == CHANGE_COLOR_TO {
-			// Add current text before changing color
-			addTextContent()
-			// Next 2 bytes are color value
-			if i+4 <= len(rawData) {
-				colorValue := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
-				content = append(content, map[string]interface{}{
-					"color": map[string]interface{}{
-						"value": colorValue,
-					},
-				})
-				i += 2 // Skip color value bytes
-			}
-			continue
-		}
-
-		// Handle PAUSE_FOR
-		if glyphID == PAUSE_FOR {
-			// Add current text before adding pause
-			addTextContent()
-			// Next 2 bytes are duration
-			if i+4 <= len(rawData) {
-				duration := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
-				content = append(content, map[string]interface{}{
-					"pause": map[string]interface{}{
-						"duration": duration,
-					},
-				})
-				i += 2 // Skip duration bytes
-			}
-			continue
-		}
-
-		// Handle FFF2 command with single parameter
-		if glyphID == FFF2 {
-			// Add current text before adding fff2
-			addTextContent()
-			// Next 2 bytes are parameter value
-			if i+4 <= len(rawData) {
-				paramValue := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
-				content = append(content, map[string]interface{}{
-					"fff2": map[string]interface{}{
-						"value": paramValue,
-					},
-				})
-				i += 2 // Skip parameter value bytes
-			}
-			continue
-		}
-
-		// Handle Termination markers
-		if glyphID == TERMINATOR_1 || glyphID == TERMINATOR_2 {
+		// Handle special commands
+		advance, shouldBreak := p.handleSpecialCommands(glyphID, rawData, i)
+		if shouldBreak {
 			break
 		}
-
-		// Convert to glyph index (subtract GLYPH_ID_BASE)
-		if glyphID >= GLYPH_ID_BASE && glyphID <= 0xFFF0 {
-			actualGlyphID := glyphID - GLYPH_ID_BASE
-
-			// Check glyph height and clut to determine font height and clut
-			if glyphs != nil && int(actualGlyphID) < len(glyphs) {
-				glyph := glyphs[actualGlyphID]
-				if glyph.GlyphHeight == 16 {
-					detectedFontHeight = 16
-				} else if glyph.GlyphHeight == 24 {
-					detectedFontHeight = 24
-				}
-				// Update font CLUT from the actual glyph data
-				detectedFontClut = glyph.GlyphClut
-			}
-
-			// Try to decode character
-			if glyphMapping != nil {
-				if char, found := glyphMapping[actualGlyphID]; found {
-					currentText += char
-				} else {
-					// Special handling for special commands
-					if glyphID == C04D {
-						currentText += TriangleDown
-					} else if glyphID == C04E {
-						currentText += TriangleRight
-					} else {
-						currentText += fmt.Sprintf("[%04X]", glyphID)
-					}
-				}
-			} else {
-				// Special handling for special commands
-				if glyphID == C04D {
-					currentText += TriangleDown
-				} else if glyphID == C04E {
-					currentText += TriangleRight
-				} else {
-					currentText += fmt.Sprintf("[%04X]", glyphID)
-				}
-			}
-		} else {
-			// Handle special control codes
-			switch glyphID {
-			case C04D:
-				currentText += "▼" // Unicode down-pointing triangle for C04D
-			case C04E:
-				currentText += "⏷" // Unicode down-pointing triangle for C04E
-			case WAIT_FOR_INPUT:
-				currentText += "⧗" // Unicode hourglass for WAIT_FOR_INPUT
-			case NEWLINE:
-				currentText += "\n"
-			case DOUBLE_NEWLINE:
-				currentText += "\n\n"
-			default:
-				specialCode := getSpecialCharacterCode(glyphID)
-				currentText += specialCode
-			}
+		if advance > 0 {
+			i += advance
+			continue
 		}
+
+		// Handle regular glyphs and special characters
+		p.handleGlyphOrSpecialChar(glyphID)
 	}
 
 	// Add any remaining text
-	addTextContent()
+	p.addTextContent()
+}
 
-	return content, entryType, detectedFontHeight, detectedFontClut, terminator
+// handleSpecialCommands handles special command processing
+func (p *dialogueTextProcessor) handleSpecialCommands(glyphID uint16, rawData []byte, i int) (int, bool) {
+	switch glyphID {
+	case INIT_TEXT_BOX:
+		return p.handleInitTextBox(rawData, i), false
+	case INIT_TAIL:
+		return p.handleInitTail(rawData, i), false
+	case F6:
+		return p.handleF6(rawData, i), false
+	case CHANGE_COLOR_TO:
+		return p.handleChangeColorTo(rawData, i), false
+	case PAUSE_FOR:
+		return p.handlePauseFor(rawData, i), false
+	case FFF2:
+		return p.handleFFF2(rawData, i), false
+	case TERMINATOR_1, TERMINATOR_2:
+		return 0, true
+	default:
+		return 0, false
+	}
+}
+
+// handleInitTextBox handles INIT_TEXT_BOX command
+func (p *dialogueTextProcessor) handleInitTextBox(rawData []byte, i int) int {
+	p.entryType = "dialogue" // Set type to dialogue when INIT TEXT BOX is found
+	// Next 2 bytes are width
+	if i+4 <= len(rawData) {
+		width := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
+		// Next 2 bytes are height
+		if i+6 <= len(rawData) {
+			height := int(binary.LittleEndian.Uint16(rawData[i+4 : i+6]))
+			p.content = append(p.content, map[string]interface{}{
+				"box": map[string]interface{}{
+					"width":  width,
+					"height": height,
+				},
+			})
+			return 4 // Skip both width and height bytes
+		} else {
+			return 2 // Skip only width bytes
+		}
+	}
+	return 0
+}
+
+// handleInitTail handles INIT_TAIL command
+func (p *dialogueTextProcessor) handleInitTail(rawData []byte, i int) int {
+	// Add current text before adding tail
+	p.addTextContent()
+	// Next 2 bytes are width
+	if i+4 <= len(rawData) {
+		width := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
+		// Next 2 bytes are height
+		if i+6 <= len(rawData) {
+			height := int(binary.LittleEndian.Uint16(rawData[i+4 : i+6]))
+			p.content = append(p.content, map[string]interface{}{
+				"tail": map[string]interface{}{
+					"width":  width,
+					"height": height,
+				},
+			})
+			return 4 // Skip both width and height bytes
+		} else {
+			return 2 // Skip only width bytes
+		}
+	}
+	return 0
+}
+
+// handleF6 handles F6 command
+func (p *dialogueTextProcessor) handleF6(rawData []byte, i int) int {
+	// Add current text before adding f6
+	p.addTextContent()
+	// Next 2 bytes are width
+	if i+4 <= len(rawData) {
+		width := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
+		// Next 2 bytes are height
+		if i+6 <= len(rawData) {
+			height := int(binary.LittleEndian.Uint16(rawData[i+4 : i+6]))
+			p.content = append(p.content, map[string]interface{}{
+				"f6": map[string]interface{}{
+					"width":  width,
+					"height": height,
+				},
+			})
+			return 4 // Skip both width and height bytes
+		} else {
+			return 2 // Skip only width bytes
+		}
+	}
+	return 0
+}
+
+// handleChangeColorTo handles CHANGE_COLOR_TO command
+func (p *dialogueTextProcessor) handleChangeColorTo(rawData []byte, i int) int {
+	// Add current text before changing color
+	p.addTextContent()
+	// Next 2 bytes are color value
+	if i+4 <= len(rawData) {
+		colorValue := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
+		p.content = append(p.content, map[string]interface{}{
+			"color": map[string]interface{}{
+				"value": colorValue,
+			},
+		})
+		return 2 // Skip color value bytes
+	}
+	return 0
+}
+
+// handlePauseFor handles PAUSE_FOR command
+func (p *dialogueTextProcessor) handlePauseFor(rawData []byte, i int) int {
+	// Add current text before adding pause
+	p.addTextContent()
+	// Next 2 bytes are duration
+	if i+4 <= len(rawData) {
+		duration := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
+		p.content = append(p.content, map[string]interface{}{
+			"pause": map[string]interface{}{
+				"duration": duration,
+			},
+		})
+		return 2 // Skip duration bytes
+	}
+	return 0
+}
+
+// handleFFF2 handles FFF2 command
+func (p *dialogueTextProcessor) handleFFF2(rawData []byte, i int) int {
+	// Add current text before adding fff2
+	p.addTextContent()
+	// Next 2 bytes are parameter value
+	if i+4 <= len(rawData) {
+		paramValue := int(binary.LittleEndian.Uint16(rawData[i+2 : i+4]))
+		p.content = append(p.content, map[string]interface{}{
+			"fff2": map[string]interface{}{
+				"value": paramValue,
+			},
+		})
+		return 2 // Skip parameter value bytes
+	}
+	return 0
+}
+
+// handleGlyphOrSpecialChar handles regular glyphs and special characters
+func (p *dialogueTextProcessor) handleGlyphOrSpecialChar(glyphID uint16) {
+	// Convert to glyph index (subtract GLYPH_ID_BASE)
+	if glyphID >= GLYPH_ID_BASE && glyphID <= 0xFFF0 {
+		p.handleRegularGlyph(glyphID)
+	} else {
+		p.handleSpecialCharacter(glyphID)
+	}
+}
+
+// handleRegularGlyph handles regular glyph processing
+func (p *dialogueTextProcessor) handleRegularGlyph(glyphID uint16) {
+	actualGlyphID := glyphID - GLYPH_ID_BASE
+
+	// Check glyph height and clut to determine font height and clut
+	if p.glyphs != nil && int(actualGlyphID) < len(p.glyphs) {
+		glyph := p.glyphs[actualGlyphID]
+		if glyph.GlyphHeight == 16 {
+			p.detectedFontHeight = 16
+		} else if glyph.GlyphHeight == 24 {
+			p.detectedFontHeight = 24
+		}
+		// Update font CLUT from the actual glyph data
+		p.detectedFontClut = glyph.GlyphClut
+	}
+
+	// Try to decode character
+	if p.glyphMapping != nil {
+		if char, found := p.glyphMapping[actualGlyphID]; found {
+			p.currentText += char
+		} else {
+			p.handleSpecialGlyphID(glyphID)
+		}
+	} else {
+		p.handleSpecialGlyphID(glyphID)
+	}
+}
+
+// handleSpecialGlyphID handles special glyph IDs
+func (p *dialogueTextProcessor) handleSpecialGlyphID(glyphID uint16) {
+	// Special handling for special commands
+	if glyphID == C04D {
+		p.currentText += TriangleDown
+	} else if glyphID == C04E {
+		p.currentText += TriangleRight
+	} else {
+		p.currentText += fmt.Sprintf("[%04X]", glyphID)
+	}
+}
+
+// handleSpecialCharacter handles special control codes
+func (p *dialogueTextProcessor) handleSpecialCharacter(glyphID uint16) {
+	switch glyphID {
+	case C04D:
+		p.currentText += "▼" // Unicode down-pointing triangle for C04D
+	case C04E:
+		p.currentText += "⏷" // Unicode down-pointing triangle for C04E
+	case WAIT_FOR_INPUT:
+		p.currentText += "⧗" // Unicode hourglass for WAIT_FOR_INPUT
+	case NEWLINE:
+		p.currentText += "\n"
+	case DOUBLE_NEWLINE:
+		p.currentText += "\n\n"
+	default:
+		specialCode := getSpecialCharacterCode(glyphID)
+		p.currentText += specialCode
+	}
 }
 
 // getSpecialCharacterCode returns the formatted string for special control codes
 func getSpecialCharacterCode(code uint16) string {
+	// Handle control flow codes
+	if controlCode := getControlFlowCode(code); controlCode != "" {
+		return controlCode
+	}
+
+	// Handle command codes with arguments
+	if commandCode := getCommandCode(code); commandCode != "" {
+		return commandCode
+	}
+
+	// Handle formatting codes
+	if formatCode := getFormattingCode(code); formatCode != "" {
+		return formatCode
+	}
+
+	// Handle unknown codes
+	return fmt.Sprintf("<%04X>", code)
+}
+
+// getControlFlowCode returns control flow codes like HALT, PROMPT
+func getControlFlowCode(code uint16) string {
+	switch code {
+	case HALT:
+		return "[HALT]"
+	case PROMPT:
+		return "[PROMPT]"
+	case WAIT_FOR_INPUT:
+		return "[WAIT FOR INPUT]"
+	default:
+		return ""
+	}
+}
+
+// getCommandCode returns command codes with arguments
+func getCommandCode(code uint16) string {
 	switch code {
 	case FFF2:
 		return "[FFF2]" // args: 1
-	case HALT:
-		return "[HALT]"
 	case F4:
 		return "[F4]"
-	case PROMPT:
-		return "[PROMPT]"
 	case F6:
 		return "[F6]" // args: 2
 	case CHANGE_COLOR_TO:
@@ -366,18 +489,24 @@ func getSpecialCharacterCode(code uint16) string {
 		return "[INIT TAIL]" // args: 2
 	case PAUSE_FOR:
 		return "[PAUSE FOR]" // args: 1
+	default:
+		return ""
+	}
+}
+
+// getFormattingCode returns formatting codes like newlines and special characters
+func getFormattingCode(code uint16) string {
+	switch code {
 	case DOUBLE_NEWLINE:
 		return "\n\n"
+	case NEWLINE:
+		return "\n" // Convert [NEWLINE] to actual newline
 	case C04D:
 		return "[C04D]"
 	case C04E:
 		return "[C04E]"
-	case WAIT_FOR_INPUT:
-		return "[WAIT FOR INPUT]"
-	case NEWLINE:
-		return "\n" // Convert [NEWLINE] to actual newline
 	default:
-		return fmt.Sprintf("<%04X>", code)
+		return ""
 	}
 }
 
@@ -483,46 +612,80 @@ func (e *WFMFileExporter) ExportDialogues(wfm *WFMFile, outputDir string) error 
 //
 // Returns a slice of dialogue IDs that are marked as special.
 func (e *WFMFileExporter) parseSpecialDialogues(reservedData []byte, totalDialogues int) []int {
-	var specialIDs []int
+	e.debugReservedSection(reservedData)
 
-	// Debug: show first 32 bytes of Reserved section for analysis
+	// Check if all bytes are zero - if so, no special dialogues exist
+	if e.isAllZero(reservedData) {
+		common.LogInfo(common.InfoNoSpecialDialoguesInFile)
+		return []int{}
+	}
+
+	specialIDs := e.extractSpecialDialogueIDs(reservedData, totalDialogues)
+	e.logSpecialDialogueResults(specialIDs)
+
+	return specialIDs
+}
+
+// debugReservedSection logs debug information about the reserved section
+func (e *WFMFileExporter) debugReservedSection(reservedData []byte) {
 	debugOutput := ""
 	for i := 0; i < 32 && i < len(reservedData); i++ {
 		debugOutput += fmt.Sprintf(common.DebugReservedSectionHex, reservedData[i])
 	}
 	common.LogDebug(common.DebugReservedSectionBytes + debugOutput)
+}
 
-	// Check if all 128 bytes are zero - if so, no special dialogues exist
-	allZero := true
-	for _, b := range reservedData {
+// isAllZero checks if all bytes in the data are zero
+func (e *WFMFileExporter) isAllZero(data []byte) bool {
+	for _, b := range data {
 		if b != 0 {
-			allZero = false
-			break
+			return false
 		}
 	}
+	return true
+}
 
-	if allZero {
-		common.LogInfo(common.InfoNoSpecialDialoguesInFile)
-		return specialIDs
-	}
+// extractSpecialDialogueIDs extracts special dialogue IDs from reserved data
+func (e *WFMFileExporter) extractSpecialDialogueIDs(reservedData []byte, totalDialogues int) []int {
+	var specialIDs []int
 
-	// Check if first uint16 is 0 but there are non-zero values after it
-	firstID := uint16(reservedData[0]) | (uint16(reservedData[1]) << 8)
-	hasNonZeroAfterFirst := false
-	for i := 2; i < len(reservedData); i++ {
-		if reservedData[i] != 0 {
-			hasNonZeroAfterFirst = true
-			break
-		}
-	}
-
-	// If first ID is 0 and there are non-zero values after, include dialogue 0 as special
-	if firstID == 0 && hasNonZeroAfterFirst {
+	// Handle special case where dialogue 0 should be included
+	if e.shouldIncludeDialogueZero(reservedData) {
 		specialIDs = append(specialIDs, 0)
 		common.LogDebug(common.DebugDialogueZeroIncluded)
 	}
 
 	// Parse uint16 IDs stored in little endian format
+	specialIDs = append(specialIDs, e.parseDialogueIDs(reservedData, totalDialogues)...)
+
+	return specialIDs
+}
+
+// shouldIncludeDialogueZero determines if dialogue 0 should be included as special
+func (e *WFMFileExporter) shouldIncludeDialogueZero(reservedData []byte) bool {
+	if len(reservedData) < 2 {
+		return false
+	}
+
+	firstID := uint16(reservedData[0]) | (uint16(reservedData[1]) << 8)
+	if firstID != 0 {
+		return false
+	}
+
+	// Check if there are non-zero values after the first ID
+	for i := 2; i < len(reservedData); i++ {
+		if reservedData[i] != 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// parseDialogueIDs parses dialogue IDs from reserved data
+func (e *WFMFileExporter) parseDialogueIDs(reservedData []byte, totalDialogues int) []int {
+	var ids []int
+
 	for i := 0; i < len(reservedData)-1; i += 2 {
 		// Extract uint16 little endian
 		id := uint16(reservedData[i]) | (uint16(reservedData[i+1]) << 8)
@@ -532,22 +695,29 @@ func (e *WFMFileExporter) parseSpecialDialogues(reservedData []byte, totalDialog
 			continue
 		}
 
-		// Only include IDs that are within the valid range for dialogue IDs
-		// IDs should be between 0 and totalDialogues-1
-		if totalDialogues <= 65535 && id < uint16(totalDialogues) {
-			specialIDs = append(specialIDs, int(id))
+		// Only include IDs that are within the valid range
+		if e.isValidDialogueID(id, totalDialogues) {
+			ids = append(ids, int(id))
 		} else {
 			common.LogWarn(common.WarnInvalidDialogueID, id, totalDialogues-1)
 		}
 	}
 
+	return ids
+}
+
+// isValidDialogueID checks if a dialogue ID is within valid range
+func (e *WFMFileExporter) isValidDialogueID(id uint16, totalDialogues int) bool {
+	return totalDialogues <= 65535 && id < uint16(totalDialogues)
+}
+
+// logSpecialDialogueResults logs the results of special dialogue parsing
+func (e *WFMFileExporter) logSpecialDialogueResults(specialIDs []int) {
 	if len(specialIDs) > 0 {
 		common.LogInfo(common.InfoSpecialDialoguesDetected, specialIDs)
 	} else {
 		common.LogInfo(common.InfoNoValidSpecialDialogues)
 	}
-
-	return specialIDs
 }
 
 // buildGlyphMapping creates a mapping from glyph ID to character by comparing glyph images.
@@ -559,14 +729,32 @@ func (e *WFMFileExporter) parseSpecialDialogues(reservedData []byte, totalDialog
 //
 // Returns a map from glyph ID to character string, or an error if mapping fails.
 func (e *WFMFileExporter) buildGlyphMapping(glyphsDir, fontDir string) (map[uint16]string, error) {
-	mapping := make(map[uint16]string)
-
 	// Check if font directory exists before proceeding
 	if _, err := os.Stat(fontDir); os.IsNotExist(err) {
 		return nil, fmt.Errorf("font directory '%s' does not exist", fontDir)
 	}
 
-	// Get list of font files recursively from fonts directory and subdirectories
+	fontFiles, err := e.collectFontFiles(fontDir)
+	if err != nil {
+		return nil, err
+	}
+
+	fontHashes, err := e.buildFontHashMap(fontFiles)
+	if err != nil {
+		return nil, err
+	}
+
+	mapping, err := e.matchGlyphsToFonts(glyphsDir, fontHashes)
+	if err != nil {
+		return nil, err
+	}
+
+	common.LogInfo(common.InfoGlyphMappingBuilt, len(mapping))
+	return mapping, nil
+}
+
+// collectFontFiles recursively collects PNG files from the font directory
+func (e *WFMFileExporter) collectFontFiles(fontDir string) ([]string, error) {
 	fontFiles := make([]string, 0)
 	err := filepath.Walk(fontDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -580,62 +768,88 @@ func (e *WFMFileExporter) buildGlyphMapping(glyphsDir, fontDir string) (map[uint
 	if err != nil {
 		return nil, fmt.Errorf("failed to walk font directory: %w", err)
 	}
+	return fontFiles, nil
+}
 
-	// Calculate hashes for each font file
+// buildFontHashMap creates a hash map of font files to character names
+func (e *WFMFileExporter) buildFontHashMap(fontFiles []string) (map[string]string, error) {
 	fontHashes := make(map[string]string) // hash -> character name
+
 	for _, fontFile := range fontFiles {
 		hash, err := e.calculateImageHash(fontFile)
 		if err != nil {
 			continue // Skip files that can't be processed
 		}
 
-		// Extract character from filename (remove .png extension)
-		baseName := filepath.Base(fontFile)
-		fileName := strings.TrimSuffix(baseName, ".png")
-
-		// Convert hexadecimal Unicode code to character
-		var charName string
-		if unicodeCode, err := strconv.ParseInt(fileName, 16, 32); err == nil {
-			// Valid hexadecimal Unicode code point
-			charName = string(rune(unicodeCode))
-		} else {
-			// Fallback to filename if not a valid hex code
-			charName = fileName
-		}
-
+		charName := e.extractCharacterName(fontFile)
 		fontHashes[hash] = charName
 	}
 
-	// Calculate hashes for each glyph file and find matches
+	return fontHashes, nil
+}
+
+// extractCharacterName extracts character name from font file path
+func (e *WFMFileExporter) extractCharacterName(fontFile string) string {
+	baseName := filepath.Base(fontFile)
+	fileName := strings.TrimSuffix(baseName, ".png")
+
+	// Convert hexadecimal Unicode code to character
+	if unicodeCode, err := strconv.ParseInt(fileName, 16, 32); err == nil {
+		// Valid hexadecimal Unicode code point
+		return string(rune(unicodeCode))
+	}
+
+	// Fallback to filename if not a valid hex code
+	return fileName
+}
+
+// matchGlyphsToFonts matches glyph files to font characters using hash comparison
+func (e *WFMFileExporter) matchGlyphsToFonts(glyphsDir string, fontHashes map[string]string) (map[uint16]string, error) {
+	mapping := make(map[uint16]string)
+
 	glyphFiles, err := filepath.Glob(filepath.Join(glyphsDir, "glyph_*.png"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to list glyph files: %w", err)
 	}
 
 	for _, glyphFile := range glyphFiles {
-		hash, err := e.calculateImageHash(glyphFile)
-		if err != nil {
-			continue // Skip files that can't be processed
-		}
-
-		// Extract glyph ID from filename
-		baseName := filepath.Base(glyphFile)
-		var glyphID int
-		if _, err := fmt.Sscanf(baseName, "glyph_%04d.png", &glyphID); err != nil {
-			continue
-		}
-
-		// Check if hash matches any font file
-		if charName, found := fontHashes[hash]; found {
-			if glyphID <= 65535 {
-				mapping[uint16(glyphID)] = charName
-				common.LogDebug(common.DebugGlyphMapped, glyphID, charName)
-			}
+		glyphID, charName, found := e.processGlyphFile(glyphFile, fontHashes)
+		if found {
+			mapping[glyphID] = charName
+			common.LogDebug(common.DebugGlyphMapped, glyphID, charName)
 		}
 	}
 
-	common.LogInfo(common.InfoGlyphMappingBuilt, len(mapping))
 	return mapping, nil
+}
+
+// processGlyphFile processes a single glyph file and returns mapping if found
+func (e *WFMFileExporter) processGlyphFile(glyphFile string, fontHashes map[string]string) (uint16, string, bool) {
+	hash, err := e.calculateImageHash(glyphFile)
+	if err != nil {
+		return 0, "", false
+	}
+
+	glyphID, err := e.extractGlyphID(glyphFile)
+	if err != nil {
+		return 0, "", false
+	}
+
+	if charName, found := fontHashes[hash]; found && glyphID <= 65535 {
+		return uint16(glyphID), charName, true
+	}
+
+	return 0, "", false
+}
+
+// extractGlyphID extracts glyph ID from filename
+func (e *WFMFileExporter) extractGlyphID(glyphFile string) (int, error) {
+	baseName := filepath.Base(glyphFile)
+	var glyphID int
+	if _, err := fmt.Sscanf(baseName, "glyph_%04d.png", &glyphID); err != nil {
+		return 0, err
+	}
+	return glyphID, nil
 }
 
 // calculateImageHash calculates a SHA256 hash of an image file for comparison.

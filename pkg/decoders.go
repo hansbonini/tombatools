@@ -106,59 +106,114 @@ func (d *WFMFileDecoder) DecodeHeader(reader io.Reader) (*WFMHeader, error) {
 
 // DecodeGlyphs reads the glyph pointer table and glyph data
 func (d *WFMFileDecoder) DecodeGlyphs(reader io.Reader, header *WFMHeader) ([]uint16, []Glyph, error) {
-	glyphPointers := make([]uint16, header.TotalGlyphs)
-	glyphs := make([]Glyph, header.TotalGlyphs)
-
-	// Read glyph pointer table
-	for i := uint16(0); i < header.TotalGlyphs; i++ {
-		if err := binary.Read(reader, binary.LittleEndian, &glyphPointers[i]); err != nil {
-			return nil, nil, fmt.Errorf("failed to read glyph pointer %d: %w", i, err)
-		}
+	glyphPointers, err := d.readGlyphPointers(reader, header.TotalGlyphs)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	// Read glyph data - each glyph has a specific structure
-	// Since we don't have the exact specification, we'll read what we can
-	for i := uint16(0); i < header.TotalGlyphs; i++ {
-		glyph := Glyph{}
-
-		// Try to read glyph structure: GlyphClut, GlyphHeight, GlyphWidth, GlyphHandakuten
-		if err := binary.Read(reader, binary.LittleEndian, &glyph.GlyphClut); err != nil {
-			// If we can't read the structure, create empty glyph
-			glyph = Glyph{
-				GlyphClut:       0,
-				GlyphHeight:     0,
-				GlyphWidth:      0,
-				GlyphHandakuten: 0,
-				GlyphImage:      []byte{},
-			}
-		} else {
-			// Continue reading the rest of the glyph structure
-			if err := binary.Read(reader, binary.LittleEndian, &glyph.GlyphHeight); err != nil {
-				glyph.GlyphHeight = 0
-			}
-			if err := binary.Read(reader, binary.LittleEndian, &glyph.GlyphWidth); err != nil {
-				glyph.GlyphWidth = 0
-			}
-			if err := binary.Read(reader, binary.LittleEndian, &glyph.GlyphHandakuten); err != nil {
-				glyph.GlyphHandakuten = 0
-			}
-
-			// Calculate expected image size (4bpp = 4 bits per pixel = 0.5 bytes per pixel)
-			if glyph.GlyphWidth > 0 && glyph.GlyphHeight > 0 {
-				imageSize := (int(glyph.GlyphWidth)*int(glyph.GlyphHeight) + 1) / 2
-				if imageSize > 0 && imageSize < 10000 { // Reasonable size limit
-					glyph.GlyphImage = make([]byte, imageSize)
-					if _, err := io.ReadFull(reader, glyph.GlyphImage); err != nil {
-						glyph.GlyphImage = []byte{}
-					}
-				}
-			}
-		}
-
-		glyphs[i] = glyph
+	glyphs, err := d.readGlyphData(reader, header.TotalGlyphs)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	return glyphPointers, glyphs, nil
+}
+
+// readGlyphPointers reads the glyph pointer table
+func (d *WFMFileDecoder) readGlyphPointers(reader io.Reader, totalGlyphs uint16) ([]uint16, error) {
+	glyphPointers := make([]uint16, totalGlyphs)
+
+	for i := uint16(0); i < totalGlyphs; i++ {
+		if err := binary.Read(reader, binary.LittleEndian, &glyphPointers[i]); err != nil {
+			return nil, fmt.Errorf("failed to read glyph pointer %d: %w", i, err)
+		}
+	}
+
+	return glyphPointers, nil
+}
+
+// readGlyphData reads glyph data for all glyphs
+func (d *WFMFileDecoder) readGlyphData(reader io.Reader, totalGlyphs uint16) ([]Glyph, error) {
+	glyphs := make([]Glyph, totalGlyphs)
+
+	for i := uint16(0); i < totalGlyphs; i++ {
+		glyph, err := d.readSingleGlyph(reader)
+		if err != nil {
+			// Create empty glyph on error
+			glyph = d.createEmptyGlyph()
+		}
+		glyphs[i] = glyph
+	}
+
+	return glyphs, nil
+}
+
+// readSingleGlyph reads a single glyph structure
+func (d *WFMFileDecoder) readSingleGlyph(reader io.Reader) (Glyph, error) {
+	glyph := Glyph{}
+
+	// Read glyph header
+	if err := d.readGlyphHeader(reader, &glyph); err != nil {
+		return glyph, err
+	}
+
+	// Read glyph image data
+	if err := d.readGlyphImage(reader, &glyph); err != nil {
+		return glyph, err
+	}
+
+	return glyph, nil
+}
+
+// readGlyphHeader reads the glyph header (clut, height, width, handakuten)
+func (d *WFMFileDecoder) readGlyphHeader(reader io.Reader, glyph *Glyph) error {
+	if err := binary.Read(reader, binary.LittleEndian, &glyph.GlyphClut); err != nil {
+		return err
+	}
+	if err := binary.Read(reader, binary.LittleEndian, &glyph.GlyphHeight); err != nil {
+		return err
+	}
+	if err := binary.Read(reader, binary.LittleEndian, &glyph.GlyphWidth); err != nil {
+		return err
+	}
+	if err := binary.Read(reader, binary.LittleEndian, &glyph.GlyphHandakuten); err != nil {
+		return err
+	}
+	return nil
+}
+
+// readGlyphImage reads the glyph image data
+func (d *WFMFileDecoder) readGlyphImage(reader io.Reader, glyph *Glyph) error {
+	// Calculate expected image size (4bpp = 4 bits per pixel = 0.5 bytes per pixel)
+	if glyph.GlyphWidth == 0 || glyph.GlyphHeight == 0 {
+		glyph.GlyphImage = []byte{}
+		return nil
+	}
+
+	imageSize := (int(glyph.GlyphWidth)*int(glyph.GlyphHeight) + 1) / 2
+	if imageSize <= 0 || imageSize >= 10000 { // Reasonable size limit
+		glyph.GlyphImage = []byte{}
+		return nil
+	}
+
+	glyph.GlyphImage = make([]byte, imageSize)
+	if _, err := io.ReadFull(reader, glyph.GlyphImage); err != nil {
+		glyph.GlyphImage = []byte{}
+		return err
+	}
+
+	return nil
+}
+
+// createEmptyGlyph creates an empty glyph structure
+func (d *WFMFileDecoder) createEmptyGlyph() Glyph {
+	return Glyph{
+		GlyphClut:       0,
+		GlyphHeight:     0,
+		GlyphWidth:      0,
+		GlyphHandakuten: 0,
+		GlyphImage:      []byte{},
+	}
 }
 
 // DecodeDialogs reads the dialog pointer table and dialog data
