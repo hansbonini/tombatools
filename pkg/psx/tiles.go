@@ -204,8 +204,8 @@ func (t *PSXTile) ToImage() *image.RGBA {
 				continue // Skip invalid pixels
 			}
 
-			color := t.Palette.GetColor(paletteIndex)
-			img.Set(x, y, color)
+			pixelColor := t.Palette.GetColor(paletteIndex)
+			img.Set(x, y, pixelColor)
 		}
 	}
 

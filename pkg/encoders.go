@@ -50,7 +50,7 @@ type RecodedDialogue struct {
 //   - outputFile: Path where the encoded WFM file will be written
 //
 // Returns an error if the encoding process fails.
-func (e *WFMFileEncoder) Encode(yamlFile string, outputFile string) error {
+func (e *WFMFileEncoder) Encode(yamlFile, outputFile string) error {
 	// Load dialogues from YAML file
 	dialogues, reservedData, err := e.LoadDialogues(yamlFile)
 	if err != nil {
@@ -79,7 +79,7 @@ func (e *WFMFileEncoder) Encode(yamlFile string, outputFile string) error {
 }
 
 // processCharactersAndBuildMappings handles character analysis and glyph mapping
-func (e *WFMFileEncoder) processCharactersAndBuildMappings(dialogues []DialogueEntry) (map[int]map[rune]uint16, map[uint16]GlyphEncodeInfo, []uint16, error) {
+func (e *WFMFileEncoder) processCharactersAndBuildMappings(dialogues []DialogueEntry) (glyphEncodeMap map[int]map[rune]uint16, glyphInfoMap map[uint16]GlyphEncodeInfo, glyphPointers []uint16, err error) {
 	// Step 1: Collect all unique characters used in dialogue text attributes
 	uniqueChars, unmappedBytes := e.collectUniqueCharacters(dialogues)
 	e.logCharacterAnalysis(uniqueChars, unmappedBytes)
@@ -268,7 +268,7 @@ func (e *WFMFileEncoder) buildReservedData(dialogues []DialogueEntry) []byte {
 }
 
 // collectUniqueCharacters collects all unique characters from dialogue content and returns unmapped bytes
-func (e *WFMFileEncoder) collectUniqueCharacters(dialogues []DialogueEntry) ([]rune, []string) {
+func (e *WFMFileEncoder) collectUniqueCharacters(dialogues []DialogueEntry) (uniqueChars []rune, unmappedBytes []string) {
 	charSet := make(map[rune]bool)
 	unmappedSet := make(map[string]bool)
 
@@ -321,7 +321,7 @@ func (e *WFMFileEncoder) collectUniqueCharacters(dialogues []DialogueEntry) ([]r
 	}
 
 	// Convert char map to slice
-	uniqueChars := make([]rune, 0, len(charSet))
+	uniqueChars = make([]rune, 0, len(charSet))
 	for char := range charSet {
 		uniqueChars = append(uniqueChars, char)
 	}
@@ -332,7 +332,7 @@ func (e *WFMFileEncoder) collectUniqueCharacters(dialogues []DialogueEntry) ([]r
 	})
 
 	// Convert unmapped map to slice
-	unmappedBytes := make([]string, 0, len(unmappedSet))
+	unmappedBytes = make([]string, 0, len(unmappedSet))
 	for unmapped := range unmappedSet {
 		unmappedBytes = append(unmappedBytes, unmapped)
 	}
@@ -448,12 +448,12 @@ func (e *WFMFileEncoder) tryLoadGlyph(char rune, fontHeight int, fontClut uint16
 
 // assignEncodeValues assigns sequential encode values starting from 0x8000 to each mapped glyph
 // Each combination of character + font height gets a unique encode value
-func (e *WFMFileEncoder) assignEncodeValues(glyphMap map[int]map[rune]Glyph) (map[int]map[rune]uint16, map[uint16]GlyphEncodeInfo, []uint16) {
+func (e *WFMFileEncoder) assignEncodeValues(glyphMap map[int]map[rune]Glyph) (glyphEncodeMap map[int]map[rune]uint16, encodeValueMap map[uint16]GlyphEncodeInfo, encodeOrder []uint16) {
 	// Map to store encode value for each glyph: [fontHeight][char] = encodeValue
-	glyphEncodeMap := make(map[int]map[rune]uint16)
+	glyphEncodeMap = make(map[int]map[rune]uint16)
 
 	// Reverse map for lookup: [encodeValue] = GlyphEncodeInfo
-	encodeValueMap := make(map[uint16]GlyphEncodeInfo)
+	encodeValueMap = make(map[uint16]GlyphEncodeInfo)
 
 	// Calculate total number of glyphs for pre-allocation
 	totalGlyphs := 0
@@ -462,7 +462,7 @@ func (e *WFMFileEncoder) assignEncodeValues(glyphMap map[int]map[rune]Glyph) (ma
 	}
 
 	// List to maintain order of encode value additions
-	encodeOrder := make([]uint16, 0, totalGlyphs)
+	encodeOrder = make([]uint16, 0, totalGlyphs)
 
 	// Counter for sequential values starting at 0x8000
 	currentEncodeValue := uint16(0x8000)
@@ -575,53 +575,59 @@ func (e *WFMFileEncoder) recodeDialogue(dialogue DialogueEntry, glyphEncodeMap m
 }
 
 // processContentItem processes a single content item and returns encoded text and original text
-func (e *WFMFileEncoder) processContentItem(contentItem map[string]interface{}, fontHeight int, glyphEncodeMap map[int]map[rune]uint16, dialogueID int) ([]uint16, string, error) {
+func (e *WFMFileEncoder) processContentItem(contentItem map[string]interface{}, fontHeight int, glyphEncodeMap map[int]map[rune]uint16, dialogueID int) (encodedText []uint16, originalText string, err error) {
 	// Handle box content
 	if boxValue, exists := contentItem["box"]; exists {
-		return e.processBoxContent(boxValue)
+		encodedText, originalText, err = e.processBoxContent(boxValue)
+		return
 	}
 
 	// Handle tail content
 	if tailValue, exists := contentItem["tail"]; exists {
-		return e.processTailContent(tailValue)
+		encodedText, originalText, err = e.processTailContent(tailValue)
+		return
 	}
 
 	// Handle f6 content
 	if f6Value, exists := contentItem["f6"]; exists {
-		return e.processF6Content(f6Value)
+		encodedText, originalText, err = e.processF6Content(f6Value)
+		return
 	}
 
 	// Handle color content
 	if colorValue, exists := contentItem["color"]; exists {
-		return e.processColorContent(colorValue)
+		encodedText, originalText, err = e.processColorContent(colorValue)
+		return
 	}
 
 	// Handle pause content
 	if pauseValue, exists := contentItem["pause"]; exists {
-		return e.processPauseContent(pauseValue)
+		encodedText, originalText, err = e.processPauseContent(pauseValue)
+		return
 	}
 
 	// Handle fff2 content
 	if fff2Value, exists := contentItem["fff2"]; exists {
-		return e.processFff2Content(fff2Value)
+		encodedText, originalText, err = e.processFff2Content(fff2Value)
+		return
 	}
 
 	// Handle text content
 	if textValue, exists := contentItem["text"]; exists {
-		return e.processTextContent(textValue, fontHeight, glyphEncodeMap, dialogueID)
+		encodedText, originalText, err = e.processTextContent(textValue, fontHeight, glyphEncodeMap, dialogueID)
+		return
 	}
 
 	return nil, "", nil
 }
 
 // processBoxContent handles box content items
-func (e *WFMFileEncoder) processBoxContent(boxValue interface{}) ([]uint16, string, error) {
+func (e *WFMFileEncoder) processBoxContent(boxValue interface{}) (encodedText []uint16, originalText string, err error) {
 	boxMap, ok := boxValue.(map[string]interface{})
 	if !ok {
 		return nil, "", nil
 	}
 
-	var encodedText []uint16
 	encodedText = append(encodedText, INIT_TEXT_BOX)
 
 	if width, hasWidth := boxMap["width"]; hasWidth {
@@ -648,13 +654,12 @@ func (e *WFMFileEncoder) processBoxContent(boxValue interface{}) ([]uint16, stri
 }
 
 // processTailContent handles tail content items
-func (e *WFMFileEncoder) processTailContent(tailValue interface{}) ([]uint16, string, error) {
+func (e *WFMFileEncoder) processTailContent(tailValue interface{}) (encodedText []uint16, originalText string, err error) {
 	tailMap, ok := tailValue.(map[string]interface{})
 	if !ok {
 		return nil, "", nil
 	}
 
-	var encodedText []uint16
 	encodedText = append(encodedText, INIT_TAIL)
 
 	if width, hasWidth := tailMap["width"]; hasWidth {
@@ -681,13 +686,12 @@ func (e *WFMFileEncoder) processTailContent(tailValue interface{}) ([]uint16, st
 }
 
 // processF6Content handles f6 content items
-func (e *WFMFileEncoder) processF6Content(f6Value interface{}) ([]uint16, string, error) {
+func (e *WFMFileEncoder) processF6Content(f6Value interface{}) (encodedText []uint16, originalText string, err error) {
 	f6Map, ok := f6Value.(map[string]interface{})
 	if !ok {
 		return nil, "", nil
 	}
 
-	var encodedText []uint16
 	encodedText = append(encodedText, F6)
 
 	if width, hasWidth := f6Map["width"]; hasWidth {
@@ -714,13 +718,12 @@ func (e *WFMFileEncoder) processF6Content(f6Value interface{}) ([]uint16, string
 }
 
 // processColorContent handles color content items
-func (e *WFMFileEncoder) processColorContent(colorValue interface{}) ([]uint16, string, error) {
+func (e *WFMFileEncoder) processColorContent(colorValue interface{}) (encodedText []uint16, originalText string, err error) {
 	colorMap, ok := colorValue.(map[string]interface{})
 	if !ok {
 		return nil, "", nil
 	}
 
-	var encodedText []uint16
 	encodedText = append(encodedText, CHANGE_COLOR_TO)
 
 	if value, hasValue := colorMap["value"]; hasValue {
@@ -737,13 +740,12 @@ func (e *WFMFileEncoder) processColorContent(colorValue interface{}) ([]uint16, 
 }
 
 // processPauseContent handles pause content items
-func (e *WFMFileEncoder) processPauseContent(pauseValue interface{}) ([]uint16, string, error) {
+func (e *WFMFileEncoder) processPauseContent(pauseValue interface{}) (encodedText []uint16, originalText string, err error) {
 	pauseMap, ok := pauseValue.(map[string]interface{})
 	if !ok {
 		return nil, "", nil
 	}
 
-	var encodedText []uint16
 	encodedText = append(encodedText, PAUSE_FOR)
 
 	if duration, hasDuration := pauseMap["duration"]; hasDuration {
@@ -760,13 +762,12 @@ func (e *WFMFileEncoder) processPauseContent(pauseValue interface{}) ([]uint16, 
 }
 
 // processFff2Content handles fff2 content items
-func (e *WFMFileEncoder) processFff2Content(fff2Value interface{}) ([]uint16, string, error) {
+func (e *WFMFileEncoder) processFff2Content(fff2Value interface{}) (encodedText []uint16, originalText string, err error) {
 	fff2Map, ok := fff2Value.(map[string]interface{})
 	if !ok {
 		return nil, "", nil
 	}
 
-	var encodedText []uint16
 	encodedText = append(encodedText, FFF2)
 
 	if value, hasValue := fff2Map["value"]; hasValue {
@@ -783,14 +784,13 @@ func (e *WFMFileEncoder) processFff2Content(fff2Value interface{}) ([]uint16, st
 }
 
 // processTextContent handles text content items
-func (e *WFMFileEncoder) processTextContent(textValue interface{}, fontHeight int, glyphEncodeMap map[int]map[rune]uint16, dialogueID int) ([]uint16, string, error) {
+func (e *WFMFileEncoder) processTextContent(textValue interface{}, fontHeight int, glyphEncodeMap map[int]map[rune]uint16, dialogueID int) (encodedText []uint16, originalText string, err error) {
 	textStr, ok := textValue.(string)
 	if !ok {
 		return nil, "", nil
 	}
 
 	// Process text character by character and tag by tag
-	var encodedText []uint16
 	runes := []rune(textStr)
 	i := 0
 
@@ -811,7 +811,7 @@ func (e *WFMFileEncoder) processTextContent(textValue interface{}, fontHeight in
 }
 
 // processTextRune processes a single rune or tag in text content
-func (e *WFMFileEncoder) processTextRune(runes []rune, i int, fontHeight int, glyphEncodeMap map[int]map[rune]uint16, dialogueID int) (bool, []uint16, int, error) {
+func (e *WFMFileEncoder) processTextRune(runes []rune, i, fontHeight int, glyphEncodeMap map[int]map[rune]uint16, dialogueID int) (isProcessed bool, encodedPart []uint16, nextIndex int, err error) {
 	if i >= len(runes) {
 		return false, nil, 0, nil
 	}
@@ -826,7 +826,7 @@ func (e *WFMFileEncoder) processTextRune(runes []rune, i int, fontHeight int, gl
 }
 
 // handleSpecialTag processes special tags like [FFF2], [HALT], etc.
-func (e *WFMFileEncoder) handleSpecialTag(runes []rune, i int, dialogueID int) (bool, []uint16, int, error) {
+func (e *WFMFileEncoder) handleSpecialTag(runes []rune, i, dialogueID int) (isTag bool, encodedPart []uint16, nextIndex int, err error) {
 	specialTagMap := map[string]uint16{
 		"[FFF2]":            FFF2,
 		"[HALT]":            HALT,
@@ -854,7 +854,7 @@ func (e *WFMFileEncoder) handleSpecialTag(runes []rune, i int, dialogueID int) (
 }
 
 // matchesTag checks if the runes at position i match the given tag
-func (e *WFMFileEncoder) matchesTag(runes []rune, i int, tag string) (bool, int) {
+func (e *WFMFileEncoder) matchesTag(runes []rune, i int, tag string) (matches bool, nextIndex int) {
 	tagRunes := []rune(tag)
 	if i+len(tagRunes) > len(runes) {
 		return false, 0
@@ -869,7 +869,7 @@ func (e *WFMFileEncoder) matchesTag(runes []rune, i int, tag string) (bool, int)
 }
 
 // handleUnmappedByte processes unmapped byte sequences like [XXXX]
-func (e *WFMFileEncoder) handleUnmappedByte(runes []rune, i int, dialogueID int) (bool, []uint16, int, error) {
+func (e *WFMFileEncoder) handleUnmappedByte(runes []rune, i, dialogueID int) (isUnmapped bool, encodedPart []uint16, nextIndex int, err error) {
 	unmappedByteRegex := regexp.MustCompile(`\[[0-9A-F]{4}\]`)
 
 	remainingText := string(runes[i:])
@@ -886,7 +886,7 @@ func (e *WFMFileEncoder) handleUnmappedByte(runes []rune, i int, dialogueID int)
 }
 
 // handleUnicodeCharacter processes regular unicode characters and special symbols
-func (e *WFMFileEncoder) handleUnicodeCharacter(runes []rune, i int, fontHeight int, glyphEncodeMap map[int]map[rune]uint16, dialogueID int) (bool, []uint16, int, error) {
+func (e *WFMFileEncoder) handleUnicodeCharacter(runes []rune, i, fontHeight int, glyphEncodeMap map[int]map[rune]uint16, dialogueID int) (isProcessed bool, encodedPart []uint16, nextIndex int, err error) {
 	char := runes[i]
 
 	// Handle special unicode symbols
@@ -918,7 +918,7 @@ func (e *WFMFileEncoder) getSpecialUnicodeCode(char rune) (uint16, bool) {
 }
 
 // handleNewline processes newline characters (single or double)
-func (e *WFMFileEncoder) handleNewline(runes []rune, i int) (bool, []uint16, int, error) {
+func (e *WFMFileEncoder) handleNewline(runes []rune, i int) (isNewline bool, encodedPart []uint16, nextIndex int, err error) {
 	// Check if this is a double newline (\n\n)
 	if i+1 < len(runes) && runes[i+1] == '\n' {
 		return true, []uint16{DOUBLE_NEWLINE}, 2, nil
@@ -927,7 +927,7 @@ func (e *WFMFileEncoder) handleNewline(runes []rune, i int) (bool, []uint16, int
 }
 
 // handleMappedCharacter processes characters that should be mapped to glyphs
-func (e *WFMFileEncoder) handleMappedCharacter(char rune, fontHeight int, glyphEncodeMap map[int]map[rune]uint16, dialogueID int) (bool, []uint16, int, error) {
+func (e *WFMFileEncoder) handleMappedCharacter(char rune, fontHeight int, glyphEncodeMap map[int]map[rune]uint16, dialogueID int) (isMapped bool, encodedPart []uint16, nextIndex int, err error) {
 	if encodeValue, exists := glyphEncodeMap[fontHeight][char]; exists {
 		return true, []uint16{encodeValue}, 1, nil
 	}
@@ -1186,7 +1186,7 @@ func (e *WFMFileEncoder) writeWFMFile(wfm *WFMFile, outputFile string) error {
 	defer file.Close()
 
 	// Write header
-	if err := e.writeHeader(file, wfm.Header); err != nil {
+	if err := e.writeHeader(file, &wfm.Header); err != nil {
 		return err
 	}
 
@@ -1224,7 +1224,7 @@ func (e *WFMFileEncoder) writeWFMFile(wfm *WFMFile, outputFile string) error {
 }
 
 // writeHeader writes the WFM header to file
-func (e *WFMFileEncoder) writeHeader(file *os.File, header WFMHeader) error {
+func (e *WFMFileEncoder) writeHeader(file *os.File, header *WFMHeader) error {
 	err := binary.Write(file, binary.LittleEndian, header)
 	if err != nil {
 		return common.FormatError(common.ErrFailedToWriteHeader, err)

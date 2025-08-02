@@ -157,7 +157,7 @@ type DialoguesYAML struct {
 }
 
 // processDialogueText processes dialogue text using the new content-based structure
-func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs []Glyph) ([]map[string]interface{}, string, int, uint16, uint16) {
+func processDialogueText(rawData []byte, glyphMapping map[uint16]string, glyphs []Glyph) (content []map[string]interface{}, entryType string, fontHeight int, fontClut uint16, terminator uint16) {
 	processor := &dialogueTextProcessor{
 		content:            make([]map[string]interface{}, 0),
 		currentText:        "",
@@ -825,19 +825,19 @@ func (e *WFMFileExporter) matchGlyphsToFonts(glyphsDir string, fontHashes map[st
 }
 
 // processGlyphFile processes a single glyph file and returns mapping if found
-func (e *WFMFileExporter) processGlyphFile(glyphFile string, fontHashes map[string]string) (uint16, string, bool) {
+func (e *WFMFileExporter) processGlyphFile(glyphFile string, fontHashes map[string]string) (glyphID uint16, charName string, found bool) {
 	hash, err := e.calculateImageHash(glyphFile)
 	if err != nil {
 		return 0, "", false
 	}
 
-	glyphID, err := e.extractGlyphID(glyphFile)
+	extractedGlyphID, err := e.extractGlyphID(glyphFile)
 	if err != nil {
 		return 0, "", false
 	}
 
-	if charName, found := fontHashes[hash]; found && glyphID <= 65535 {
-		return uint16(glyphID), charName, true
+	if charName, found := fontHashes[hash]; found && extractedGlyphID <= 65535 {
+		return uint16(extractedGlyphID), charName, true
 	}
 
 	return 0, "", false
