@@ -1520,7 +1520,7 @@ func (e *WFMFileEncoder) getGlyphPath(char rune, fontHeight int) (string, error)
 	}
 
 	// Find the file in the corresponding height folder
-	fontDir := filepath.Join("fonts", fmt.Sprintf("%d", fontHeight))
+	fontDir := filepath.Join("fonts", "br", fmt.Sprintf("%d", fontHeight))
 
 	// List all subfolders and search for the file
 	subdirs := []string{"lowercase", "uppercase", "numbers", "symbols", "psx"}
@@ -1554,4 +1554,137 @@ func (e *WFMFileEncoder) loadPNGImage(path string) (image.Image, error) {
 // NewWFMEncoder creates a new WFM encoder instance
 func NewWFMEncoder() *WFMFileEncoder {
 	return &WFMFileEncoder{}
+}
+
+// PackGAM creates a GAM file from uncompressed data using LZ compression
+func (p *GAMProcessor) PackGAM(inputFile, outputFile string) error {
+	// Read uncompressed data
+	uncompressedData, err := os.ReadFile(inputFile)
+	if err != nil {
+		return fmt.Errorf("failed to read input file: %w", err)
+	}
+
+	// Create GAM structure
+	gam := &GAMFile{
+		Header: GAMHeader{
+			Magic:            [3]byte{'G', 'A', 'M'},
+			Reserved:         0x00,
+			UncompressedSize: uint32(len(uncompressedData)),
+		},
+		UncompressedData: uncompressedData,
+	}
+
+	// Compress the data
+	if err := p.compressLZ(gam); err != nil {
+		return fmt.Errorf("failed to compress data: %w", err)
+	}
+
+	// Write GAM file
+	if err := p.writeGAMFile(gam, outputFile); err != nil {
+		return fmt.Errorf("failed to write GAM file: %w", err)
+	}
+
+	common.LogInfo("GAM file packed successfully: %s -> %s", inputFile, outputFile)
+	common.LogInfo("Uncompressed size: %d bytes, Compressed size: %d bytes",
+		len(gam.UncompressedData), len(gam.CompressedData))
+
+	return nil
+}
+
+// compressLZ implements LZ compression (reverse of decompression)
+func (p *GAMProcessor) compressLZ(gam *GAMFile) error {
+	input := gam.UncompressedData
+	output := make([]byte, 0)
+
+	pos := 0
+
+	common.LogDebug("Starting LZ compression: input size = %d bytes", len(input))
+
+	for pos < len(input) {
+		bitmask := uint16(0)
+		bitmaskPos := len(output)
+		output = append(output, 0, 0) // Reserve space for bitmask
+
+		// Process up to 16 bytes/references
+		for bit := 0; bit < 16 && pos < len(input); bit++ {
+			// Find best match in previous data
+			bestOffset, bestLength := p.findBestMatch(input, pos)
+
+			if bestLength >= 2 && bestOffset <= 255 && bestLength <= 255 {
+				// Use LZ reference
+				bitmask |= (1 << bit)
+				output = append(output, byte(bestOffset), byte(bestLength))
+				pos += bestLength
+
+				common.LogDebug("LZ reference: offset=%d, length=%d", bestOffset, bestLength)
+			} else {
+				// Use literal byte
+				output = append(output, input[pos])
+				pos++
+
+				common.LogDebug("Literal byte: 0x%02X", input[pos-1])
+			}
+		}
+
+		// Write bitmask in little endian
+		binary.LittleEndian.PutUint16(output[bitmaskPos:bitmaskPos+2], bitmask)
+		common.LogDebug("Bitmask: 0x%04X", bitmask)
+	}
+
+	gam.CompressedData = output
+	common.LogDebug("LZ compression completed: %d -> %d bytes", len(input), len(output))
+
+	return nil
+}
+
+// findBestMatch finds the best LZ match for current position
+func (p *GAMProcessor) findBestMatch(data []byte, pos int) (offset, length int) {
+	bestOffset := 0
+	bestLength := 0
+
+	// Search backwards for matches (up to 255 bytes back)
+	maxOffset := pos
+	if maxOffset > 255 {
+		maxOffset = 255
+	}
+
+	for o := 1; o <= maxOffset; o++ {
+		srcPos := pos - o
+		matchLength := 0
+
+		// Count matching bytes
+		for matchLength < 255 && pos+matchLength < len(data) &&
+			data[srcPos+matchLength%o] == data[pos+matchLength] {
+			matchLength++
+		}
+
+		// Keep best match
+		if matchLength > bestLength {
+			bestOffset = o
+			bestLength = matchLength
+		}
+	}
+
+	return bestOffset, bestLength
+}
+
+// writeGAMFile writes a complete GAM file
+func (p *GAMProcessor) writeGAMFile(gam *GAMFile, outputFile string) error {
+	file, err := os.Create(outputFile)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer file.Close()
+
+	// Write header
+	if err := binary.Write(file, binary.LittleEndian, gam.Header); err != nil {
+		return fmt.Errorf("failed to write header: %w", err)
+	}
+
+	// Write compressed data
+	if _, err := file.Write(gam.CompressedData); err != nil {
+		return fmt.Errorf("failed to write compressed data: %w", err)
+	}
+
+	return nil
 }

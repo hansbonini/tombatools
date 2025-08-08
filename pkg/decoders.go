@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/hansbonini/tombatools/pkg/common"
 )
@@ -18,6 +19,11 @@ type WFMFileDecoder struct{}
 // Returns a pointer to a WFMFileDecoder ready for parsing WFM files.
 func NewWFMDecoder() *WFMFileDecoder {
 	return &WFMFileDecoder{}
+}
+
+// NewGAMProcessor creates a new GAM processor instance
+func NewGAMProcessor() *GAMProcessor {
+	return &GAMProcessor{}
 }
 
 // Decode reads and parses a complete WFM file from the provided reader.
@@ -284,4 +290,167 @@ func (d *WFMFileDecoder) DecodeDialogues(reader io.Reader, header *WFMHeader) ([
 	}
 
 	return dialoguePointers, dialogues, nil
+}
+
+// UnpackGAM extracts data from a GAM file using LZ decompression
+func (p *GAMProcessor) UnpackGAM(inputFile, outputFile string) error {
+	// Open input GAM file
+	file, err := os.Open(inputFile)
+	if err != nil {
+		return fmt.Errorf("failed to open GAM file: %w", err)
+	}
+	defer file.Close()
+
+	// Get file size
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to get file info: %w", err)
+	}
+
+	// Read and parse GAM file
+	gam, err := p.readGAMFile(file, fileInfo.Size())
+	if err != nil {
+		return fmt.Errorf("failed to read GAM file: %w", err)
+	}
+
+	// Decompress the data
+	if err := p.decompressLZ(gam); err != nil {
+		return fmt.Errorf("failed to decompress GAM data: %w", err)
+	}
+
+	// Write decompressed data to output file
+	if err := p.writeDecompressedData(gam, outputFile); err != nil {
+		return fmt.Errorf("failed to write decompressed data: %w", err)
+	}
+
+	common.LogInfo("GAM file unpacked successfully: %s -> %s", inputFile, outputFile)
+	common.LogInfo("Original size: %d bytes, Decompressed size: %d bytes",
+		len(gam.CompressedData), len(gam.UncompressedData))
+
+	return nil
+}
+
+// readGAMFile reads and parses a GAM file
+func (p *GAMProcessor) readGAMFile(file *os.File, fileSize int64) (*GAMFile, error) {
+	gam := &GAMFile{
+		OriginalSize: fileSize,
+	}
+
+	// Read header (8 bytes)
+	if err := binary.Read(file, binary.LittleEndian, &gam.Header); err != nil {
+		return nil, fmt.Errorf("failed to read GAM header: %w", err)
+	}
+
+	// Verify magic
+	if string(gam.Header.Magic[:]) != "GAM" {
+		return nil, fmt.Errorf("invalid GAM magic: expected 'GAM', got '%s'", string(gam.Header.Magic[:]))
+	}
+
+	// Read compressed data (rest of file)
+	compressedSize := fileSize - 8
+	gam.CompressedData = make([]byte, compressedSize)
+	if _, err := io.ReadFull(file, gam.CompressedData); err != nil {
+		return nil, fmt.Errorf("failed to read compressed data: %w", err)
+	}
+
+	common.LogDebug("GAM header read: magic=%s, uncompressed_size=%d",
+		string(gam.Header.Magic[:]), gam.Header.UncompressedSize)
+
+	return gam, nil
+}
+
+// decompressLZ implements the LZ decompression algorithm from the Python script
+func (p *GAMProcessor) decompressLZ(gam *GAMFile) error {
+	compressed := gam.CompressedData
+	targetSize := int(gam.Header.UncompressedSize)
+
+	// Initialize output buffer
+	output := make([]byte, 0, targetSize)
+
+	compPos := 0 // Position in compressed data
+
+	common.LogDebug("Starting LZ decompression: target size = %d bytes", targetSize)
+
+	for len(output) < targetSize && compPos < len(compressed) {
+		// Check if we have enough bytes for bitmask
+		if compPos+1 >= len(compressed) {
+			break
+		}
+
+		// Read 2-byte bitmask (little endian)
+		bitmaskBytes := binary.LittleEndian.Uint16(compressed[compPos : compPos+2])
+		compPos += 2
+
+		common.LogDebug("Bitmask at offset %d: 0x%04X", compPos-2, bitmaskBytes)
+
+		// Process 16 bits of the bitmask
+		for bit := 0; bit < 16 && len(output) < targetSize && compPos < len(compressed); bit++ {
+			if (bitmaskBytes & (1 << bit)) != 0 {
+				// Bit is 1: LZ reference
+				if compPos+1 >= len(compressed) {
+					break
+				}
+
+				lzByte1 := compressed[compPos]
+				lzByte2 := compressed[compPos+1]
+				compPos += 2
+
+				// Calculate offset and length
+				offset := int(lzByte1)
+				length := int(lzByte2)
+
+				common.LogDebug("LZ reference at %d: offset=%d, length=%d", compPos-2, offset, length)
+
+				// Validate offset
+				if offset > len(output) {
+					return fmt.Errorf("invalid LZ offset: %d (output size: %d)", offset, len(output))
+				}
+
+				// Copy data from previous position
+				srcPos := len(output) - offset
+				for i := 0; i < length && len(output) < targetSize; i++ {
+					if srcPos+i >= len(output) {
+						return fmt.Errorf("invalid LZ reference: srcPos=%d, i=%d, output_len=%d", srcPos, i, len(output))
+					}
+					output = append(output, output[srcPos+i])
+				}
+			} else {
+				// Bit is 0: literal byte
+				if compPos >= len(compressed) {
+					break
+				}
+
+				literal := compressed[compPos]
+				compPos++
+				output = append(output, literal)
+
+				common.LogDebug("Literal byte at %d: 0x%02X", compPos-1, literal)
+			}
+		}
+	}
+
+	// Handle padding if output is smaller than expected
+	if len(output) < targetSize {
+		padding := targetSize - len(output)
+		common.LogDebug("Adding %d bytes of padding", padding)
+		for i := 0; i < padding; i++ {
+			output = append(output, 0x00)
+		}
+	}
+
+	// Truncate if output is larger than expected
+	if len(output) > targetSize {
+		common.LogDebug("Truncating output from %d to %d bytes", len(output), targetSize)
+		output = output[:targetSize]
+	}
+
+	gam.UncompressedData = output
+	common.LogDebug("LZ decompression completed: %d -> %d bytes", len(gam.CompressedData), len(output))
+
+	return nil
+}
+
+// writeDecompressedData writes decompressed data to file
+func (p *GAMProcessor) writeDecompressedData(gam *GAMFile, outputFile string) error {
+	return os.WriteFile(outputFile, gam.UncompressedData, 0644)
 }

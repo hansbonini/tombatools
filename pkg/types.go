@@ -167,3 +167,21 @@ type WFMProcessor interface {
 	WFMExporter
 	Process(inputFile string, outputDir string) error
 }
+
+// GAMHeader represents the 8-byte header of a GAM file
+type GAMHeader struct {
+	Magic            [3]byte // "GAM"
+	Reserved         byte    // Padding byte (typically 0x00)
+	UncompressedSize uint32  // Size of the decompressed data
+}
+
+// GAMFile represents a complete GAM file structure
+type GAMFile struct {
+	Header           GAMHeader
+	CompressedData   []byte
+	UncompressedData []byte
+	OriginalSize     int64
+}
+
+// GAMProcessor handles GAM file operations (unpack/pack)
+type GAMProcessor struct{}
