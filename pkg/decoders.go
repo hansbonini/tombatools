@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/hansbonini/tombatools/pkg/common"
+	"github.com/hansbonini/tombatools/pkg/psx"
 )
 
 // WFMFileDecoder implements the WFMDecoder interface and provides
@@ -24,6 +26,11 @@ func NewWFMDecoder() *WFMFileDecoder {
 // NewGAMProcessor creates a new GAM processor instance
 func NewGAMProcessor() *GAMProcessor {
 	return &GAMProcessor{}
+}
+
+// NewCDProcessor creates a new CD processor instance
+func NewCDProcessor() *CDFileProcessor {
+	return &CDFileProcessor{}
 }
 
 // Decode reads and parses a complete WFM file from the provided reader.
@@ -453,4 +460,155 @@ func (p *GAMProcessor) decompressLZ(gam *GAMFile) error {
 // writeDecompressedData writes decompressed data to file
 func (p *GAMProcessor) writeDecompressedData(gam *GAMFile, outputFile string) error {
 	return os.WriteFile(outputFile, gam.UncompressedData, 0644)
+}
+
+// Dump extracts files from a CD image file (.bin format) using mkpsxiso-style parsing
+func (p *CDFileProcessor) Dump(inputFile string, outputDir string) error {
+	common.LogDebug("Starting CD dump operation: %s -> %s", inputFile, outputDir)
+
+	// Create CD reader using the new mkpsxiso-style implementation
+	reader, err := psx.NewCDReader(inputFile)
+	if err != nil {
+		return fmt.Errorf("failed to open CD image file: %w", err)
+	}
+	defer reader.Close()
+
+	// Create output directory if it doesn't exist
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	// Validate ISO9660 format
+	if err := reader.ValidateISO9660(); err != nil {
+		return fmt.Errorf("invalid ISO9660 image: %w", err)
+	}
+
+	// Read and validate ISO descriptor
+	descriptor, err := reader.ReadISODescriptor()
+	if err != nil {
+		return fmt.Errorf("failed to read ISO descriptor: %w", err)
+	}
+
+	common.LogDebug("ISO9660 file system detected")
+	common.LogDebug("Volume ID: %s", string(descriptor.VolumeID[:]))
+	common.LogDebug("Volume size: %d sectors", descriptor.VolumeSpaceSizeLSB)
+
+	// Parse root directory from descriptor using mkpsxiso method
+	rootLBA := common.ExtractLBAFromDirRecord(descriptor.RootDirRecord[:])
+	rootSize := common.ExtractSizeFromDirRecord(descriptor.RootDirRecord[:])
+
+	common.LogDebug("Root directory: LBA %d, Size %d bytes", rootLBA, rootSize)
+
+	// Extract files using the new directory parsing method
+	files, err := p.extractAllFiles(reader, rootLBA, rootSize, outputDir)
+	if err != nil {
+		return fmt.Errorf("failed to extract files: %w", err)
+	}
+
+	fmt.Printf("\nExtracted %d files successfully!\n", len(files))
+
+	return nil
+}
+
+// extractAllFiles extracts all files using mkpsxiso-style directory parsing
+func (p *CDFileProcessor) extractAllFiles(reader *psx.CDReader, rootLBA uint32, rootSize uint32, outputDir string) ([]psx.CDFileEntry, error) {
+	var allFiles []psx.CDFileEntry
+	validFiles := 0
+	extractedFiles := 0
+
+	fmt.Printf("Parsing directory entries...\n")
+
+	// Parse root directory using the new method
+	files, err := reader.ParseDirectoryEntries(int64(rootLBA), rootSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse root directory: %w", err)
+	}
+
+	// Process all files found in root directory
+	for _, file := range files {
+		validFiles++
+
+		if common.VerboseMode {
+			fmt.Printf("ID: %04X | MSF: %s | LBA: %08d | Size: %10d | %s\n",
+				validFiles, file.MSF, file.LBA, file.Size, file.Name)
+		}
+
+		if !file.IsDir && file.Size > 0 {
+			// Extract regular file
+			outputPath := filepath.Join(outputDir, file.Name)
+
+			err := reader.ExtractFile(file.LBA, file.Size, outputPath)
+			if err != nil {
+				if common.VerboseMode {
+					fmt.Printf("  WARNING: Failed to extract %s: %v\n", file.Name, err)
+				} else {
+					common.LogDebug("Failed to extract %s: %v", file.Name, err)
+				}
+				continue
+			}
+
+			extractedFiles++
+			fmt.Printf("Extracted: %s\n", file.Name)
+
+		} else if file.IsDir && file.Name != "." && file.Name != ".." {
+			// Process subdirectory recursively
+			common.LogDebug("Processing directory: %s", file.Name)
+
+			dirPath := filepath.Join(outputDir, file.Name)
+			if err := os.MkdirAll(dirPath, 0755); err != nil {
+				common.LogDebug("Failed to create directory %s: %v", dirPath, err)
+				continue
+			}
+
+			// Parse subdirectory entries
+			subFiles, err := reader.ParseDirectoryEntries(int64(file.LBA), file.Size)
+			if err != nil {
+				common.LogDebug("Failed to parse subdirectory %s: %v", file.Name, err)
+				continue
+			}
+
+			// Extract files from subdirectory
+			for _, subFile := range subFiles {
+				if subFile.Name == "." || subFile.Name == ".." {
+					continue
+				}
+
+				validFiles++
+
+				if common.VerboseMode {
+					fmt.Printf("ID: %04X | MSF: %s | LBA: %08d | Size: %10d | %s/%s\n",
+						validFiles, subFile.MSF, subFile.LBA, subFile.Size, file.Name, subFile.Name)
+				}
+
+				if !subFile.IsDir && subFile.Size > 0 {
+					outputPath := filepath.Join(dirPath, subFile.Name)
+
+					err := reader.ExtractFile(subFile.LBA, subFile.Size, outputPath)
+					if err != nil {
+						if common.VerboseMode {
+							fmt.Printf("  WARNING: Failed to extract %s/%s: %v\n", file.Name, subFile.Name, err)
+						} else {
+							common.LogDebug("Failed to extract %s/%s: %v", file.Name, subFile.Name, err)
+						}
+						continue
+					}
+
+					extractedFiles++
+					fmt.Printf("Extracted: %s/%s\n", file.Name, subFile.Name)
+				}
+
+				// Add to file list for tracking
+				subFile.Path = file.Name
+				allFiles = append(allFiles, subFile)
+			}
+		}
+
+		// Add to file list for tracking
+		allFiles = append(allFiles, file)
+	}
+
+	fmt.Printf("\nTotal valid entries found: %d\n", validFiles)
+	fmt.Printf("Files extracted: %d\n", extractedFiles)
+
+	return allFiles, nil
 }

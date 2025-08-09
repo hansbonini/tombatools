@@ -20,12 +20,15 @@ game files from Tomba! (Ore no Tomba) for PlayStation.
 Currently supports:
   - WFM font files (extract/create glyphs and dialogues)
   - GAM files (unpack/pack game data)
+  - CD image files (extract files from ISO9660 file system)
 
 Examples:
   tombatools wfm decode CFNT999H.WFM ./output/
   tombatools wfm encode dialogues.yaml CFNT999H_modified.WFM
   tombatools gam unpack GAME.GAM data.UNGAM
   tombatools gam pack data.UNGAM GAME_modified.GAM
+  tombatools cd dump original.bin ./output/
+  tombatools cd dump -v original.bin ./output/
 
 Use 'tombatools [command] --help' for more information about a command.`,
 }

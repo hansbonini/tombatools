@@ -185,3 +185,11 @@ type GAMFile struct {
 
 // GAMProcessor handles GAM file operations (unpack/pack)
 type GAMProcessor struct{}
+
+// CDProcessor handles CD image operations (dump)
+type CDProcessor interface {
+	Dump(inputFile string, outputDir string) error
+}
+
+// CDFileProcessor implements the CDProcessor interface
+type CDFileProcessor struct{}
