@@ -70,11 +70,21 @@ Example:
 
 		// Display the table in organized columns (always show in verbose mode)
 		if verbose || true { // Show table by default for now
-			fmt.Printf("ID   | Timecode  | Size\n")
-			fmt.Printf("-----|-----------|----------\n")
+			fmt.Printf("ID   | Timecode (Hex) | Timecode (Dec) | Size       | Filename\n")
+			fmt.Printf("-----|----------------|----------------|------------|--------------------------------------------------\n")
 
 			for i, entry := range table.Entries {
-				fmt.Printf("%04X | %s | %d\n", i, entry.Timecode.String(), entry.FileSize)
+				filename := "NOT LINKED"
+				if entry.LinkedFile != nil {
+					filename = entry.LinkedFile.FullPath
+				}
+				
+				fmt.Printf("%04X | %-14s | %-14s | %-10d | %s\n", 
+					i, 
+					entry.Timecode.String(), 
+					entry.TimecodeDecimal, 
+					entry.FileSize,
+					filename)
 			}
 		}
 

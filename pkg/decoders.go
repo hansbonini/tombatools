@@ -653,6 +653,8 @@ func (p *FLAProcessor) ReadFLATable(reader io.Reader, count uint32, offset uint3
 			return nil, fmt.Errorf("failed to read FLA entry %d: %w", i, err)
 		}
 
+		// Convert timecode to decimal string for comparison
+		entry.TimecodeDecimal = entry.Timecode.ToDecimalString()
 		table.Entries[i] = *entry
 
 		if common.VerboseMode {
@@ -703,6 +705,16 @@ func (p *FLAProcessor) AnalyzeCDImage(imagePath string) (*FileLinkAddressTable, 
 	table, err := p.extractFLAFromExecutable(exeData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract FLA table: %w", err)
+	}
+
+	// Collect all files from CD for linking
+	cdFiles, err := p.collectAllCDFiles(reader, rootLBA, rootSize)
+	if err != nil {
+		common.LogDebug("Warning: could not collect CD files for linking: %v", err)
+		// Continue without linking
+	} else {
+		// Link FLA entries with CD files
+		p.linkFLAWithCDFiles(table, cdFiles)
 	}
 
 	return table, nil
@@ -968,4 +980,118 @@ func (p *FLAProcessor) readFileDataFromCD(reader *psx.CDReader, lba uint32, file
 	common.LogDebug("Successfully read %d bytes from CD", len(data))
 
 	return data, nil
+}
+
+// collectAllCDFiles collects all files from the CD image for FLA linking
+func (p *FLAProcessor) collectAllCDFiles(reader *psx.CDReader, rootLBA uint32, rootSize uint32) ([]CDFileInfo, error) {
+	var allFiles []CDFileInfo
+
+	common.LogDebug("Collecting all files from CD for FLA linking")
+
+	// Parse root directory entries
+	files, err := reader.ParseDirectoryEntries(int64(rootLBA), rootSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse root directory: %w", err)
+	}
+
+	// Process all files and directories recursively
+	for _, file := range files {
+		if file.Name == "." || file.Name == ".." {
+			continue
+		}
+
+		if file.IsDir {
+			// Process subdirectory recursively
+			subFiles, err := p.collectFilesFromDirectory(reader, file.Name, file.LBA, file.Size)
+			if err != nil {
+				common.LogDebug("Warning: failed to collect files from directory %s: %v", file.Name, err)
+				continue
+			}
+			allFiles = append(allFiles, subFiles...)
+		} else {
+			// Add regular file
+			cdFile := CDFileInfo{
+				Name:     file.Name,
+				FullPath: file.Name,
+				LBA:      file.LBA,
+				Size:     file.Size,
+				MSF:      file.MSF,
+			}
+			allFiles = append(allFiles, cdFile)
+		}
+	}
+
+	common.LogDebug("Collected %d files from CD image", len(allFiles))
+	return allFiles, nil
+}
+
+// collectFilesFromDirectory recursively collects files from a directory
+func (p *FLAProcessor) collectFilesFromDirectory(reader *psx.CDReader, parentPath string, lba uint32, size uint32) ([]CDFileInfo, error) {
+	var files []CDFileInfo
+
+	// Parse directory entries
+	dirFiles, err := reader.ParseDirectoryEntries(int64(lba), size)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, file := range dirFiles {
+		if file.Name == "." || file.Name == ".." {
+			continue
+		}
+
+		fullPath := parentPath + "/" + file.Name
+
+		if file.IsDir {
+			// Recurse into subdirectory
+			subFiles, err := p.collectFilesFromDirectory(reader, fullPath, file.LBA, file.Size)
+			if err != nil {
+				common.LogDebug("Warning: failed to collect files from directory %s: %v", fullPath, err)
+				continue
+			}
+			files = append(files, subFiles...)
+		} else {
+			// Add regular file
+			cdFile := CDFileInfo{
+				Name:     file.Name,
+				FullPath: fullPath,
+				LBA:      file.LBA,
+				Size:     file.Size,
+				MSF:      file.MSF,
+			}
+			files = append(files, cdFile)
+		}
+	}
+
+	return files, nil
+}
+
+// linkFLAWithCDFiles links FLA entries with corresponding CD files based on MSF timecode
+func (p *FLAProcessor) linkFLAWithCDFiles(table *FileLinkAddressTable, cdFiles []CDFileInfo) {
+	common.LogDebug("Linking FLA entries with CD files")
+
+	linkedCount := 0
+	
+	for i := range table.Entries {
+		entry := &table.Entries[i]
+
+		// Try to find matching file by MSF timecode
+		for _, cdFile := range cdFiles {
+			if entry.TimecodeDecimal == cdFile.MSF {
+				// Found matching MSF timecode
+				entry.LinkedFile = &CDFileInfo{
+					Name:     cdFile.Name,
+					FullPath: cdFile.FullPath,
+					LBA:      cdFile.LBA,
+					Size:     cdFile.Size,
+					MSF:      cdFile.MSF,
+				}
+				linkedCount++
+				common.LogDebug("Linked FLA entry %d (%s) with file: %s", i, entry.TimecodeDecimal, cdFile.FullPath)
+				break
+			}
+		}
+	}
+
+	common.LogDebug("Successfully linked %d of %d FLA entries with CD files", linkedCount, len(table.Entries))
 }

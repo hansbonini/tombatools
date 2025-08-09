@@ -211,18 +211,44 @@ func (msf MSFTimecode) String() string {
 	return fmt.Sprintf("%02X:%02X:%02X", msf.Minutes, msf.Seconds, msf.Sectors)
 }
 
+// ToDecimalString returns the MSF timecode in decimal MM:SS:FF format
+// This is used for comparing with CD file MSF values
+func (msf MSFTimecode) ToDecimalString() string {
+	// Convert BCD to decimal
+	minutes := int(msf.Minutes>>4)*10 + int(msf.Minutes&0x0F)
+	seconds := int(msf.Seconds>>4)*10 + int(msf.Seconds&0x0F)
+	sectors := int(msf.Sectors>>4)*10 + int(msf.Sectors&0x0F)
+	
+	return fmt.Sprintf("%02d:%02d:%02d", minutes, seconds, sectors)
+}
+
 // FileLinkAddressEntry represents a single entry in the File Link Address table
 // Each entry is 8 bytes total:
 // - 4 bytes (big-endian): MSF timecode (minutes, seconds, sectors, unused)
 // - 4 bytes (little-endian): file size
 type FileLinkAddressEntry struct {
-	Timecode MSFTimecode // MSF timecode (4 bytes, big-endian)
-	FileSize uint32      // File size in bytes (4 bytes, little-endian)
+	Timecode     MSFTimecode // MSF timecode (4 bytes, big-endian)
+	FileSize     uint32      // File size in bytes (4 bytes, little-endian)
+	LinkedFile   *CDFileInfo // Linked file information from CD (optional)
+	TimecodeDecimal string   // Decimal representation of MSF for comparison
+}
+
+// CDFileInfo contains information about a file found in the CD image
+type CDFileInfo struct {
+	Name     string // File name
+	FullPath string // Complete path within CD
+	LBA      uint32 // Logical Block Address
+	Size     uint32 // File size in bytes
+	MSF      string // MSF timecode in MM:SS:FF format
 }
 
 // String returns a formatted representation of the FLA entry
 func (fla FileLinkAddressEntry) String() string {
-	return fmt.Sprintf("MSF: %s, Size: %d bytes", fla.Timecode.String(), fla.FileSize)
+	if fla.LinkedFile != nil {
+		return fmt.Sprintf("MSF: %s (%s), Size: %d bytes, File: %s", 
+			fla.Timecode.String(), fla.TimecodeDecimal, fla.FileSize, fla.LinkedFile.FullPath)
+	}
+	return fmt.Sprintf("MSF: %s (%s), Size: %d bytes", fla.Timecode.String(), fla.TimecodeDecimal, fla.FileSize)
 }
 
 // FileLinkAddressTable represents the complete FLA table from a PlayStation executable
