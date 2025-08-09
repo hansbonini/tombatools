@@ -1,6 +1,9 @@
 package pkg
 
-import "io"
+import (
+	"fmt"
+	"io"
+)
 
 // Special control codes constants
 const (
@@ -193,3 +196,41 @@ type CDProcessor interface {
 
 // CDFileProcessor implements the CDProcessor interface
 type CDFileProcessor struct{}
+
+// MSFTimecode represents a Minutes:Seconds:Sectors timecode used in PlayStation CD-ROM addressing
+type MSFTimecode struct {
+	Minutes byte // Minutes component (0-99)
+	Seconds byte // Seconds component (0-59)
+	Sectors byte // Sectors component (0-74)
+	Unused  byte // Unused/padding byte
+}
+
+// String returns the MSF timecode in MM:SS:SS format
+// MSF values are stored as raw bytes and displayed as hexstring
+func (msf MSFTimecode) String() string {
+	return fmt.Sprintf("%02X:%02X:%02X", msf.Minutes, msf.Seconds, msf.Sectors)
+}
+
+// FileLinkAddressEntry represents a single entry in the File Link Address table
+// Each entry is 8 bytes total:
+// - 4 bytes (big-endian): MSF timecode (minutes, seconds, sectors, unused)
+// - 4 bytes (little-endian): file size
+type FileLinkAddressEntry struct {
+	Timecode MSFTimecode // MSF timecode (4 bytes, big-endian)
+	FileSize uint32      // File size in bytes (4 bytes, little-endian)
+}
+
+// String returns a formatted representation of the FLA entry
+func (fla FileLinkAddressEntry) String() string {
+	return fmt.Sprintf("MSF: %s, Size: %d bytes", fla.Timecode.String(), fla.FileSize)
+}
+
+// FileLinkAddressTable represents the complete FLA table from a PlayStation executable
+type FileLinkAddressTable struct {
+	Entries []FileLinkAddressEntry // Array of FLA entries
+	Offset  uint32                 // Offset in the executable where the table was found
+	Count   uint32                 // Number of entries in the table
+}
+
+// FLAProcessor handles File Link Address operations
+type FLAProcessor struct{}

@@ -21,6 +21,7 @@ Currently supports:
   - WFM font files (extract/create glyphs and dialogues)
   - GAM files (unpack/pack game data)
   - CD image files (extract files from ISO9660 file system)
+  - FLA files (recalculate file link addresses)
 
 Examples:
   tombatools wfm decode CFNT999H.WFM ./output/
@@ -29,6 +30,7 @@ Examples:
   tombatools gam pack data.UNGAM GAME_modified.GAM
   tombatools cd dump original.bin ./output/
   tombatools cd dump -v original.bin ./output/
+  tombatools fla recalc original.bin
 
 Use 'tombatools [command] --help' for more information about a command.`,
 }

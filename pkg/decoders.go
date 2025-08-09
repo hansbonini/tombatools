@@ -3,6 +3,7 @@
 package pkg
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -31,6 +32,11 @@ func NewGAMProcessor() *GAMProcessor {
 // NewCDProcessor creates a new CD processor instance
 func NewCDProcessor() *CDFileProcessor {
 	return &CDFileProcessor{}
+}
+
+// NewFLAProcessor creates a new FLA processor instance
+func NewFLAProcessor() *FLAProcessor {
+	return &FLAProcessor{}
 }
 
 // Decode reads and parses a complete WFM file from the provided reader.
@@ -611,4 +617,355 @@ func (p *CDFileProcessor) extractAllFiles(reader *psx.CDReader, rootLBA uint32, 
 	fmt.Printf("Files extracted: %d\n", extractedFiles)
 
 	return allFiles, nil
+}
+
+// ReadFLAEntry reads a single File Link Address entry from the reader
+// Each entry is 8 bytes: 4-byte MSF timecode (big-endian) + 4-byte file size (little-endian)
+func (p *FLAProcessor) ReadFLAEntry(reader io.Reader) (*FileLinkAddressEntry, error) {
+	entry := &FileLinkAddressEntry{}
+
+	// Read MSF timecode (4 bytes, big-endian)
+	if err := binary.Read(reader, binary.BigEndian, &entry.Timecode); err != nil {
+		return nil, fmt.Errorf("failed to read MSF timecode: %w", err)
+	}
+
+	// Read file size (4 bytes, little-endian)
+	if err := binary.Read(reader, binary.LittleEndian, &entry.FileSize); err != nil {
+		return nil, fmt.Errorf("failed to read file size: %w", err)
+	}
+
+	return entry, nil
+}
+
+// ReadFLATable reads multiple FLA entries from the reader
+func (p *FLAProcessor) ReadFLATable(reader io.Reader, count uint32, offset uint32) (*FileLinkAddressTable, error) {
+	table := &FileLinkAddressTable{
+		Offset:  offset,
+		Count:   count,
+		Entries: make([]FileLinkAddressEntry, count),
+	}
+
+	common.LogDebug("Reading FLA table: %d entries at offset 0x%X", count, offset)
+
+	for i := uint32(0); i < count; i++ {
+		entry, err := p.ReadFLAEntry(reader)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read FLA entry %d: %w", i, err)
+		}
+
+		table.Entries[i] = *entry
+
+		if common.VerboseMode {
+			common.LogDebug("FLA Entry %d: %s", i, entry.String())
+		}
+	}
+
+	return table, nil
+}
+
+// AnalyzeCDImage analyzes a CD image and extracts the FLA table from MAIN0.EXE
+func (p *FLAProcessor) AnalyzeCDImage(imagePath string) (*FileLinkAddressTable, error) {
+	common.LogDebug("Opening CD image: %s", imagePath)
+
+	// Create CD reader
+	reader, err := psx.NewCDReader(imagePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open CD image: %w", err)
+	}
+	defer reader.Close()
+
+	// Validate ISO9660 format
+	if err := reader.ValidateISO9660(); err != nil {
+		return nil, fmt.Errorf("invalid ISO9660 image: %w", err)
+	}
+
+	// Read ISO descriptor
+	descriptor, err := reader.ReadISODescriptor()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read ISO descriptor: %w", err)
+	}
+
+	common.LogDebug("ISO9660 validated successfully")
+
+	// Parse root directory
+	rootLBA := common.ExtractLBAFromDirRecord(descriptor.RootDirRecord[:])
+	rootSize := common.ExtractSizeFromDirRecord(descriptor.RootDirRecord[:])
+
+	// Find and extract MAIN0.EXE
+	exeData, err := p.extractMainExecutable(reader, rootLBA, rootSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract MAIN0.EXE: %w", err)
+	}
+
+	common.LogDebug("MAIN0.EXE extracted successfully, size: %d bytes", len(exeData))
+
+	// Analyze the executable and extract FLA table
+	table, err := p.extractFLAFromExecutable(exeData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract FLA table: %w", err)
+	}
+
+	return table, nil
+}
+
+// extractMainExecutable finds and extracts MAIN0.EXE from the CD image
+func (p *FLAProcessor) extractMainExecutable(reader *psx.CDReader, rootLBA uint32, rootSize uint32) ([]byte, error) {
+	// Parse root directory entries
+	files, err := reader.ParseDirectoryEntries(int64(rootLBA), rootSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse root directory: %w", err)
+	}
+
+	// Look for EXE directory
+	var exeDirFile *psx.CDFileEntry
+	for _, file := range files {
+		if file.IsDir && file.Name == "EXE" {
+			exeDirFile = &file
+			break
+		}
+	}
+
+	if exeDirFile == nil {
+		return nil, fmt.Errorf("EXE directory not found in CD image")
+	}
+
+	common.LogDebug("Found EXE directory at LBA %d", exeDirFile.LBA)
+
+	// Parse EXE directory
+	exeFiles, err := reader.ParseDirectoryEntries(int64(exeDirFile.LBA), exeDirFile.Size)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse EXE directory: %w", err)
+	}
+
+	// Look for MAIN0.EXE
+	var main0File *psx.CDFileEntry
+	for _, file := range exeFiles {
+		if !file.IsDir && file.Name == "MAIN0.EXE" {
+			main0File = &file
+			break
+		}
+	}
+
+	if main0File == nil {
+		return nil, fmt.Errorf("MAIN0.EXE not found in EXE directory")
+	}
+
+	common.LogDebug("Found MAIN0.EXE at LBA %d, size: %d bytes", main0File.LBA, main0File.Size)
+
+	// Read the executable data
+	exeData, err := p.readFileDataFromCD(reader, main0File.LBA, main0File.Size)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read MAIN0.EXE data: %w", err)
+	}
+
+	return exeData, nil
+}
+
+// extractFLAFromExecutable analyzes a PlayStation executable and extracts the FLA table
+func (p *FLAProcessor) extractFLAFromExecutable(exeData []byte) (*FileLinkAddressTable, error) {
+	// For now, we'll implement a basic pattern search for FLA table
+	// The FLA table typically starts with recognizable MSF patterns
+	// This is a simplified implementation that looks for potential FLA entries
+
+	common.LogDebug("Analyzing executable for FLA table, size: %d bytes", len(exeData))
+
+	// Look for potential FLA table by searching for MSF-like patterns
+	// We'll search for sequences that look like valid MSF timecodes
+	offset, count := p.findFLATableLocation(exeData)
+
+	if offset == 0 || count == 0 {
+		return nil, fmt.Errorf("FLA table not found in executable")
+	}
+
+	common.LogDebug("Found potential FLA table at offset 0x%X with %d entries", offset, count)
+
+	// Create a reader from the executable data at the found offset
+	tableData := exeData[offset:]
+	reader := bytes.NewReader(tableData)
+
+	// Read the FLA table
+	table, err := p.ReadFLATable(reader, count, offset)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read FLA table: %w", err)
+	}
+
+	return table, nil
+}
+
+// findFLATableLocation searches for the FLA table location in the executable
+// For the EU version, the FLA table is located at offset 0x6E6F0 in MAIN0.EXE
+func (p *FLAProcessor) findFLATableLocation(exeData []byte) (uint32, uint32) {
+	// Known offset for EU version MAIN0.EXE
+	tableOffset := uint32(0x6E6F0)
+
+	common.LogDebug("Using known FLA table offset: 0x%X", tableOffset)
+
+	// Check if the offset is within the executable bounds
+	if int(tableOffset) >= len(exeData) {
+		common.LogDebug("FLA table offset 0x%X is beyond executable size %d", tableOffset, len(exeData))
+		return 0, 0
+	}
+
+	// Debug: Show the raw bytes at the known offset
+	if int(tableOffset)+32 <= len(exeData) {
+		rawBytes := exeData[tableOffset : tableOffset+32]
+		common.LogDebug("Raw bytes at offset 0x%X: %02X", tableOffset, rawBytes)
+	}
+
+	// Try to count valid entries from the known offset (more permissive)
+	count := p.countValidFLAEntries(exeData[tableOffset:])
+
+	if count >= 1 {
+		common.LogDebug("Found FLA table at known offset 0x%X with %d entries", tableOffset, count)
+		return tableOffset, count
+	}
+
+	common.LogDebug("Data at offset 0x%X doesn't have valid FLA entries, trying pattern search", tableOffset)
+
+	return tableOffset, count
+}
+
+// findFLATableByPattern is a fallback method that searches for FLA table patterns
+func (p *FLAProcessor) findFLATableByPattern(exeData []byte) (uint32, uint32) {
+	// Start searching from a reasonable offset in the executable
+	startOffset := 0x2000 // Skip PSX-EXE header and initial code
+	entrySize := 8        // Each FLA entry is 8 bytes
+
+	common.LogDebug("Falling back to pattern search starting from offset 0x%X", startOffset)
+
+	// Look for the first valid-looking MSF sequence
+	for i := startOffset; i < len(exeData)-entrySize*10; i += 4 { // Align to 4-byte boundaries
+		// Check if this could be the start of an FLA table
+		if p.looksLikeFLATable(exeData[i:], 10) { // Check first 10 entries
+			// Count how many consecutive valid entries we have
+			count := p.countValidFLAEntries(exeData[i:])
+			if count >= 5 { // Need at least 5 valid entries to consider it a table
+				common.LogDebug("Found FLA table by pattern at offset 0x%X with %d entries", i, count)
+				return uint32(i), count
+			}
+		}
+	}
+
+	return 0, 0
+}
+
+// looksLikeFLATable checks if data at offset looks like an FLA table
+func (p *FLAProcessor) looksLikeFLATable(data []byte, maxEntries int) bool {
+	if len(data) < 8*maxEntries {
+		return false
+	}
+
+	validEntries := 0
+	for i := 0; i < maxEntries && i*8+8 <= len(data); i++ {
+		offset := i * 8
+
+		// Extract MSF components (big-endian)
+		minutes := data[offset]
+		seconds := data[offset+1]
+		sectors := data[offset+2]
+
+		// Extract file size (little-endian)
+		size := binary.LittleEndian.Uint32(data[offset+4 : offset+8])
+
+		// Check if this looks like a valid MSF timecode and file size
+		if p.isValidMSF(minutes, seconds, sectors) && p.isReasonableFileSize(size) {
+			validEntries++
+		}
+	}
+
+	// Consider it a valid FLA table if at least 70% of entries look valid
+	return float64(validEntries)/float64(maxEntries) >= 0.7
+}
+
+// countValidFLAEntries counts consecutive valid FLA entries
+func (p *FLAProcessor) countValidFLAEntries(data []byte) uint32 {
+	count := uint32(0)
+
+	for i := 0; i*8+8 <= len(data); i++ {
+		offset := i * 8
+
+		// Extract MSF components (big-endian)
+		minutes := data[offset]
+		seconds := data[offset+1]
+		sectors := data[offset+2]
+
+		// Extract file size (little-endian)
+		size := binary.LittleEndian.Uint32(data[offset+4 : offset+8])
+
+		// Check if this looks like a valid entry
+		if p.isValidMSF(minutes, seconds, sectors) && p.isReasonableFileSize(size) {
+			count++
+		} else {
+			break // Stop at first invalid entry
+		}
+	}
+
+	return count
+}
+
+// isValidMSF checks if MSF components are valid (in BCD format)
+func (p *FLAProcessor) isValidMSF(minutes, seconds, sectors byte) bool {
+	// Convert BCD to decimal for validation
+	minutesBCD := int(minutes>>4)*10 + int(minutes&0x0F)
+	secondsBCD := int(seconds>>4)*10 + int(seconds&0x0F)
+	sectorsBCD := int(sectors>>4)*10 + int(sectors&0x0F)
+
+	return minutesBCD <= 99 && secondsBCD <= 59 && sectorsBCD <= 74
+}
+
+// isReasonableFileSize checks if file size is reasonable for a CD file
+func (p *FLAProcessor) isReasonableFileSize(size uint32) bool {
+	// File size should be reasonable (not 0, not too large for a CD)
+	return size > 0 && size <= 700*1024*1024 // Max 700MB (CD capacity)
+}
+
+// readFileDataFromCD reads file data from CD image into memory
+// This method reads directly from sectors to avoid extraction issues
+func (p *FLAProcessor) readFileDataFromCD(reader *psx.CDReader, lba uint32, fileSize uint32) ([]byte, error) {
+	common.LogDebug("Reading file data from LBA %d, size %d bytes", lba, fileSize)
+
+	// Calculate number of sectors needed (each sector has 2048 bytes of data)
+	sectorsNeeded := (fileSize + 2047) / 2048
+
+	common.LogDebug("Need to read %d sectors starting from LBA %d", sectorsNeeded, lba)
+
+	// Allocate buffer for all data
+	data := make([]byte, 0, fileSize)
+
+	// Read sector by sector
+	for i := uint32(0); i < sectorsNeeded; i++ {
+		currentLBA := lba + i
+
+		// Seek to the sector
+		if err := reader.SeekToSector(int64(currentLBA)); err != nil {
+			return nil, fmt.Errorf("failed to seek to sector %d: %w", currentLBA, err)
+		}
+
+		// Read the sector data (2048 bytes per sector)
+		sectorData := make([]byte, 2048)
+		bytesRead, err := reader.ReadBytes(sectorData)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read sector %d: %w", currentLBA, err)
+		}
+
+		// Determine how much data to take from this sector
+		bytesToTake := uint32(bytesRead)
+		if uint32(len(data))+bytesToTake > fileSize {
+			bytesToTake = fileSize - uint32(len(data))
+		}
+
+		// Append data to our buffer
+		data = append(data, sectorData[:bytesToTake]...)
+
+		common.LogDebug("Read sector %d: %d bytes, total so far: %d bytes", currentLBA, bytesToTake, len(data))
+
+		// Break if we have enough data
+		if uint32(len(data)) >= fileSize {
+			break
+		}
+	}
+
+	common.LogDebug("Successfully read %d bytes from CD", len(data))
+
+	return data, nil
 }
