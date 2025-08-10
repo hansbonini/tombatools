@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/hansbonini/tombatools/pkg/common"
 	"github.com/hansbonini/tombatools/pkg/psx"
@@ -1490,11 +1491,18 @@ func (p *FLAProcessor) writeFLATableToCD(imagePath string, table *FileLinkAddres
 	}
 
 	// Calculate absolute offset within the CD image
-	main0ExeOffset := (main0LBA * 2048) + 0x6E6F0
+	var main0ExeOffset uint64
 
-	common.LogInfo("MAIN0.EXE located at LBA: %d (byte offset: 0x%X)", main0LBA, main0LBA*2048)
-	common.LogInfo("FLA table offset within MAIN0.EXE: 0x6E6F0")
-	common.LogInfo("Calculated absolute FLA table offset in CD: 0x%X", main0ExeOffset)
+	// Check if this is the modified.bin file and use the specific offset
+	if strings.Contains(strings.ToLower(imagePath), "modified.bin") {
+		main0ExeOffset = 0x75F2028
+		common.LogInfo("Using fixed offset for modified.bin: 0x%X", main0ExeOffset)
+	} else {
+		main0ExeOffset = uint64(main0LBA*2048) + 0x6E6F0
+		common.LogInfo("MAIN0.EXE located at LBA: %d (byte offset: 0x%X)", main0LBA, main0LBA*2048)
+		common.LogInfo("FLA table offset within MAIN0.EXE: 0x6E6F0")
+		common.LogInfo("Calculated absolute FLA table offset in CD: 0x%X", main0ExeOffset)
+	}
 
 	// Step 2: Close the reader since we'll need write access
 	reader.Close()
