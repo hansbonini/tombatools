@@ -26,24 +26,32 @@ Examples:
   tombatools fla recalc original.bin`,
 }
 
-// flaRecalcCmd recalculates file link addresses from a CD image.
-// It reads the CD image and analyzes the FLA table structure.
+// flaRecalcCmd recalculates file link addresses by comparing original and modified CD images.
+// It detects differences and updates the FLA table in the modified image.
 var flaRecalcCmd = &cobra.Command{
-	Use:   "recalc [image.bin]",
-	Short: "Recalculate file addresses from CD image",
-	Long: `Recalculate file link addresses from a PlayStation CD image.
+	Use:   "recalc [original.bin] [modified.bin]",
+	Short: "Recalculate file addresses by comparing original and modified CD images",
+	Long: `Recalculate file link addresses by comparing original and modified CD images.
 
-This command reads a CD image file and analyzes the File Link Address (FLA)
-table structure used in Tomba! PSX game.
+This command compares two CD images, detects files with different MSF timecodes
+and sizes, and recalculates the File Link Address (FLA) table in the modified image.
 
 Arguments:
-  image.bin    CD image file to analyze
+  original.bin    Original CD image file (reference)
+  modified.bin    Modified CD image file (to be updated)
 
-Example:
-  tombatools fla recalc original.bin`,
-	Args: cobra.ExactArgs(1),
+Flags:
+  -v, --verbose       Enable verbose output (show debug messages)
+  -s, --save-table    Save the recalculated FLA table to a .bin file
+
+Examples:
+  tombatools fla recalc original.bin modified.bin
+  tombatools fla recalc -v original.bin modified.bin
+  tombatools fla recalc --save-table fla_table.bin original.bin modified.bin`,
+	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		imageBin := args[0]
+		originalBin := args[0]
+		modifiedBin := args[1]
 
 		// Enable verbose mode if requested
 		verbose, err := cmd.Flags().GetBool("verbose")
@@ -52,41 +60,107 @@ Example:
 		}
 		common.SetVerboseMode(verbose)
 
-		fmt.Printf("CD image: %s\n", imageBin)
+		// Check if user wants to save FLA table to a separate file
+		saveTable, err := cmd.Flags().GetString("save-table")
+		if err != nil {
+			return fmt.Errorf("error getting save-table flag: %w", err)
+		}
+
+		fmt.Printf("Original CD image: %s\n", originalBin)
+		fmt.Printf("Modified CD image: %s\n", modifiedBin)
 
 		// Create FLA processor for handling recalculation operations
 		processor := pkg.NewFLAProcessor()
 
-		fmt.Printf("\nStarting FLA analysis process...\n")
+		fmt.Printf("\nAnalyzing original CD image...\n")
 
-		// Analyze the CD image and extract FLA table
-		table, err := processor.AnalyzeCDImage(imageBin)
+		// Analyze the original CD image and extract FLA table
+		originalTable, err := processor.AnalyzeCDImage(originalBin)
 		if err != nil {
-			return fmt.Errorf("failed to analyze CD image: %w", err)
+			return fmt.Errorf("failed to analyze original CD image: %w", err)
 		}
 
-		fmt.Printf("\nFLA Table Analysis Complete!\n")
-		fmt.Printf("Found %d entries at offset 0x%X\n\n", table.Count, table.Offset)
+		fmt.Printf("Original FLA Table: Found %d entries at offset 0x%X\n", originalTable.Count, originalTable.Offset)
 
-		// Display the table in organized columns (always show in verbose mode)
-		if verbose || true { // Show table by default for now
-			fmt.Printf("ID   | Timecode (Hex) | Timecode (Dec) | Size       | Filename\n")
-			fmt.Printf("-----|----------------|----------------|------------|--------------------------------------------------\n")
+		fmt.Printf("\nAnalyzing modified CD image...\n")
 
-			for i, entry := range table.Entries {
-				filename := "NOT LINKED"
-				if entry.LinkedFile != nil {
-					filename = entry.LinkedFile.FullPath
-				}
-				
-				fmt.Printf("%04X | %-14s | %-14s | %-10d | %s\n", 
-					i, 
-					entry.Timecode.String(), 
-					entry.TimecodeDecimal, 
-					entry.FileSize,
-					filename)
+		// Analyze the modified CD image and extract FLA table
+		modifiedTable, err := processor.AnalyzeCDImage(modifiedBin)
+		if err != nil {
+			return fmt.Errorf("failed to analyze modified CD image: %w", err)
+		}
+
+		fmt.Printf("Modified FLA Table: Found %d entries at offset 0x%X\n", modifiedTable.Count, modifiedTable.Offset)
+
+		fmt.Printf("\nComparing actual files between CD images to detect differences...\n")
+
+		// Compare actual files in CD images to detect differences
+		fileDifferences, err := processor.CompareCDFiles(originalBin, modifiedBin, originalTable, modifiedTable)
+		if err != nil {
+			return fmt.Errorf("failed to compare CD files: %w", err)
+		}
+
+		if len(fileDifferences) == 0 {
+			fmt.Printf("No differences found between CD files.\n")
+			return nil
+		}
+
+		fmt.Printf("Found %d file differences that require FLA table updates:\n\n", len(fileDifferences))
+
+		fmt.Printf("\nRecalculating FLA table in modified image...\n")
+
+		// Recalculate and update the FLA table in the modified image
+		err = processor.RecalculateFLATable(modifiedBin, originalTable, modifiedTable, fileDifferences)
+		if err != nil {
+			return fmt.Errorf("failed to recalculate FLA table: %w", err)
+		}
+
+		// Save FLA table to separate file if requested
+		if saveTable != "" {
+			fmt.Printf("Saving recalculated FLA table to: %s\n", saveTable)
+			err = processor.SaveFLATableToFile(modifiedTable, saveTable)
+			if err != nil {
+				return fmt.Errorf("failed to save FLA table to file: %w", err)
 			}
+			fmt.Printf("FLA table saved successfully!\n")
 		}
+
+		// Display differences after recalculation to show updated values
+		fmt.Printf("ID   | FLA MSF        | Original Size | Modified Size | Size Diff | File\n")
+		fmt.Printf("-----|----------------|---------------|---------------|-----------|--------------------------------------------------\n")
+
+		for _, diff := range fileDifferences {
+			originalEntry := originalTable.Entries[diff.EntryIndex]
+			modifiedEntry := modifiedTable.Entries[diff.EntryIndex]
+			
+			filename := "NOT LINKED"
+			if modifiedEntry.LinkedFile != nil {
+				filename = modifiedEntry.LinkedFile.FullPath
+			} else if originalEntry.LinkedFile != nil {
+				filename = originalEntry.LinkedFile.FullPath
+			}
+
+			// Use FLA table sizes for display (after recalculation they will show the updated sizes)
+			originalSize := originalEntry.FileSize
+			modifiedSize := modifiedEntry.FileSize
+
+			sizeDiff := int64(modifiedSize) - int64(originalSize)
+			sizeDiffStr := fmt.Sprintf("%+d", sizeDiff)
+
+			fmt.Printf("%04X | %-14s | %-13d | %-13d | %-9s | %s\n",
+				diff.EntryIndex,
+				originalEntry.Timecode.String(),
+				originalSize,
+				modifiedSize,
+				sizeDiffStr,
+				filename)
+		}
+
+		fmt.Printf("FLA table recalculation complete!\n")
+		fmt.Printf("\nSummary:\n")
+		fmt.Printf("- Detected %d file(s) with size changes\n", len(fileDifferences))
+		fmt.Printf("- Updated FLA table written to: %s\n", modifiedBin)
+		fmt.Printf("- All subsequent file positions have been recalculated\n")
 
 		return nil
 	},
@@ -102,4 +176,7 @@ func init() {
 
 	// Add verbose flag to recalc command for detailed output
 	flaRecalcCmd.Flags().BoolP("verbose", "v", false, "Enable verbose output (show debug messages)")
+	
+	// Add save-table flag to save the recalculated FLA table to a separate .bin file
+	flaRecalcCmd.Flags().StringP("save-table", "s", "", "Save the recalculated FLA table to a .bin file")
 }

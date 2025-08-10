@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/hansbonini/tombatools/pkg/common"
 	"github.com/hansbonini/tombatools/pkg/psx"
@@ -693,16 +694,16 @@ func (p *FLAProcessor) AnalyzeCDImage(imagePath string) (*FileLinkAddressTable, 
 	rootLBA := common.ExtractLBAFromDirRecord(descriptor.RootDirRecord[:])
 	rootSize := common.ExtractSizeFromDirRecord(descriptor.RootDirRecord[:])
 
-	// Find and extract MAIN0.EXE
-	exeData, err := p.extractMainExecutable(reader, rootLBA, rootSize)
+	// Find and extract MAIN0.EXE with LBA information
+	exeData, main0LBA, err := p.extractMainExecutableWithLBA(reader, rootLBA, rootSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract MAIN0.EXE: %w", err)
 	}
 
 	common.LogDebug("MAIN0.EXE extracted successfully, size: %d bytes", len(exeData))
 
-	// Analyze the executable and extract FLA table
-	table, err := p.extractFLAFromExecutable(exeData)
+	// Analyze the executable and extract FLA table with correct absolute offset
+	table, err := p.extractFLAFromExecutableWithLBA(exeData, main0LBA)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract FLA table: %w", err)
 	}
@@ -718,6 +719,59 @@ func (p *FLAProcessor) AnalyzeCDImage(imagePath string) (*FileLinkAddressTable, 
 	}
 
 	return table, nil
+}
+
+// extractMainExecutableWithLBA finds and extracts MAIN0.EXE from the CD image, returning both data and LBA
+func (p *FLAProcessor) extractMainExecutableWithLBA(reader *psx.CDReader, rootLBA uint32, rootSize uint32) ([]byte, uint32, error) {
+	// Parse root directory entries
+	files, err := reader.ParseDirectoryEntries(int64(rootLBA), rootSize)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to parse root directory: %w", err)
+	}
+
+	// Look for EXE directory
+	var exeDirFile *psx.CDFileEntry
+	for _, file := range files {
+		if file.IsDir && file.Name == "EXE" {
+			exeDirFile = &file
+			break
+		}
+	}
+
+	if exeDirFile == nil {
+		return nil, 0, fmt.Errorf("EXE directory not found in CD image")
+	}
+
+	common.LogDebug("Found EXE directory at LBA %d", exeDirFile.LBA)
+
+	// Parse EXE directory
+	exeFiles, err := reader.ParseDirectoryEntries(int64(exeDirFile.LBA), exeDirFile.Size)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to parse EXE directory: %w", err)
+	}
+
+	// Look for MAIN0.EXE
+	var main0File *psx.CDFileEntry
+	for _, file := range exeFiles {
+		if !file.IsDir && file.Name == "MAIN0.EXE" {
+			main0File = &file
+			break
+		}
+	}
+
+	if main0File == nil {
+		return nil, 0, fmt.Errorf("MAIN0.EXE not found in EXE directory")
+	}
+
+	common.LogDebug("Found MAIN0.EXE at LBA %d, size: %d bytes", main0File.LBA, main0File.Size)
+
+	// Read the executable data
+	exeData, err := p.readFileDataFromCD(reader, main0File.LBA, main0File.Size)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to read MAIN0.EXE data: %w", err)
+	}
+
+	return exeData, main0File.LBA, nil
 }
 
 // extractMainExecutable finds and extracts MAIN0.EXE from the CD image
@@ -771,6 +825,39 @@ func (p *FLAProcessor) extractMainExecutable(reader *psx.CDReader, rootLBA uint3
 	}
 
 	return exeData, nil
+}
+
+// extractFLAFromExecutableWithLBA analyzes a PlayStation executable and extracts the FLA table with correct absolute offset
+func (p *FLAProcessor) extractFLAFromExecutableWithLBA(exeData []byte, main0LBA uint32) (*FileLinkAddressTable, error) {
+	// For now, we'll implement a basic pattern search for FLA table
+	// The FLA table typically starts with recognizable MSF patterns
+
+	common.LogDebug("Analyzing executable for FLA table, size: %d bytes", len(exeData))
+
+	// Look for potential FLA table by searching for MSF-like patterns
+	// We'll search for sequences that look like valid MSF timecodes
+	relativeOffset, count := p.findFLATableLocation(exeData)
+
+	if relativeOffset == 0 || count == 0 {
+		return nil, fmt.Errorf("FLA table not found in executable")
+	}
+
+	// Calculate absolute offset in CD image: (LBA * sector_size) + relative_offset_in_exe
+	absoluteOffset := (main0LBA * 2048) + relativeOffset
+
+	common.LogDebug("Found potential FLA table at relative offset 0x%X (absolute: 0x%X) with %d entries", relativeOffset, absoluteOffset, count)
+
+	// Create a reader from the executable data at the found offset
+	tableData := exeData[relativeOffset:]
+	reader := bytes.NewReader(tableData)
+
+	// Read the FLA table with the correct absolute offset
+	table, err := p.ReadFLATable(reader, count, absoluteOffset)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read FLA table: %w", err)
+	}
+
+	return table, nil
 }
 
 // extractFLAFromExecutable analyzes a PlayStation executable and extracts the FLA table
@@ -1094,4 +1181,477 @@ func (p *FLAProcessor) linkFLAWithCDFiles(table *FileLinkAddressTable, cdFiles [
 	}
 
 	common.LogDebug("Successfully linked %d of %d FLA entries with CD files", linkedCount, len(table.Entries))
+}
+
+// CompareFLATables compares two FLA tables and returns a list of differences
+func (p *FLAProcessor) CompareFLATables(originalTable, modifiedTable *FileLinkAddressTable) ([]FLADifference, error) {
+	var differences []FLADifference
+
+	// Check if tables have the same number of entries
+	if originalTable.Count != modifiedTable.Count {
+		return nil, fmt.Errorf("FLA tables have different entry counts: original=%d, modified=%d", 
+			originalTable.Count, modifiedTable.Count)
+	}
+
+	common.LogDebug("Comparing %d FLA entries between original and modified tables", originalTable.Count)
+
+	// Compare each entry
+	for i := uint32(0); i < originalTable.Count; i++ {
+		originalEntry := originalTable.Entries[i]
+		modifiedEntry := modifiedTable.Entries[i]
+
+		var diff FLADifference
+		diff.EntryIndex = i
+		hasChanges := false
+
+		// Check if timecode changed
+		if originalEntry.Timecode.Minutes != modifiedEntry.Timecode.Minutes ||
+			originalEntry.Timecode.Seconds != modifiedEntry.Timecode.Seconds ||
+			originalEntry.Timecode.Sectors != modifiedEntry.Timecode.Sectors {
+			diff.TimecodeChanged = true
+			hasChanges = true
+		}
+
+		// Check if file size changed in FLA table
+		if originalEntry.FileSize != modifiedEntry.FileSize {
+			diff.SizeChanged = true
+			hasChanges = true
+		}
+
+		// Additional check: if files are linked, compare actual file sizes from CD
+		if originalEntry.LinkedFile != nil && modifiedEntry.LinkedFile != nil {
+			if originalEntry.LinkedFile.Size != modifiedEntry.LinkedFile.Size {
+				common.LogDebug("Real file size difference detected for %s: original=%d, modified=%d", 
+					originalEntry.LinkedFile.FullPath, originalEntry.LinkedFile.Size, modifiedEntry.LinkedFile.Size)
+				
+				// If the FLA table hasn't been updated to reflect the real file size difference
+				if !diff.SizeChanged {
+					diff.SizeChanged = true
+					hasChanges = true
+					common.LogDebug("FLA table needs update for file %s", originalEntry.LinkedFile.FullPath)
+				}
+			}
+		}
+
+		// If there are changes, add to differences list
+		if hasChanges {
+			var changes []string
+			if diff.TimecodeChanged {
+				changes = append(changes, fmt.Sprintf("MSF: %s → %s", 
+					originalEntry.Timecode.String(), modifiedEntry.Timecode.String()))
+			}
+			if diff.SizeChanged {
+				originalSize := originalEntry.FileSize
+				modifiedSize := modifiedEntry.FileSize
+				
+				// Use real file sizes if available and different
+				if originalEntry.LinkedFile != nil && modifiedEntry.LinkedFile != nil {
+					if originalEntry.LinkedFile.Size != modifiedEntry.LinkedFile.Size {
+						originalSize = originalEntry.LinkedFile.Size
+						modifiedSize = modifiedEntry.LinkedFile.Size
+					}
+				}
+				
+				changes = append(changes, fmt.Sprintf("Size: %d → %d bytes", originalSize, modifiedSize))
+			}
+			
+			diff.Description = fmt.Sprintf("Entry %04X: %s", i, fmt.Sprintf("%v", changes))
+			differences = append(differences, diff)
+
+			common.LogDebug("Found difference in entry %04X: %s", i, diff.Description)
+		}
+	}
+
+	common.LogDebug("Found %d differences between FLA tables", len(differences))
+	return differences, nil
+}
+
+// CompareCDFiles compares specific files between two CD images to detect size differences
+func (p *FLAProcessor) CompareCDFiles(originalImagePath, modifiedImagePath string, originalTable, modifiedTable *FileLinkAddressTable) ([]FLADifference, error) {
+	var differences []FLADifference
+	
+	common.LogDebug("Comparing actual files between CD images")
+	
+	// Open both CD readers
+	originalReader, err := psx.NewCDReader(originalImagePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open original CD image: %w", err)
+	}
+	defer originalReader.Close()
+	
+	modifiedReader, err := psx.NewCDReader(modifiedImagePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open modified CD image: %w", err)
+	}
+	defer modifiedReader.Close()
+	
+	// Get file lists from both CDs
+	originalDescriptor, err := originalReader.ReadISODescriptor()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read original ISO descriptor: %w", err)
+	}
+	
+	modifiedDescriptor, err := modifiedReader.ReadISODescriptor()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read modified ISO descriptor: %w", err)
+	}
+	
+	originalRootLBA := common.ExtractLBAFromDirRecord(originalDescriptor.RootDirRecord[:])
+	originalRootSize := common.ExtractSizeFromDirRecord(originalDescriptor.RootDirRecord[:])
+	
+	modifiedRootLBA := common.ExtractLBAFromDirRecord(modifiedDescriptor.RootDirRecord[:])
+	modifiedRootSize := common.ExtractSizeFromDirRecord(modifiedDescriptor.RootDirRecord[:])
+	
+	// Collect files from both CDs
+	originalFiles, err := p.collectAllCDFiles(originalReader, originalRootLBA, originalRootSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to collect original CD files: %w", err)
+	}
+	
+	modifiedFiles, err := p.collectAllCDFiles(modifiedReader, modifiedRootLBA, modifiedRootSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to collect modified CD files: %w", err)
+	}
+	
+	// Create maps for quick lookup
+	originalFileMap := make(map[string]*CDFileInfo)
+	modifiedFileMap := make(map[string]*CDFileInfo)
+	
+	for i := range originalFiles {
+		originalFileMap[originalFiles[i].FullPath] = &originalFiles[i]
+	}
+	
+	for i := range modifiedFiles {
+		modifiedFileMap[modifiedFiles[i].FullPath] = &modifiedFiles[i]
+	}
+	
+	common.LogDebug("Comparing file sizes and positions between CDs")
+	
+	// Check each FLA entry to see if its linked file has changed
+	for i := uint32(0); i < originalTable.Count; i++ {
+		originalEntry := originalTable.Entries[i]
+		
+		// Skip if not linked to a file
+		if originalEntry.LinkedFile == nil {
+			continue
+		}
+		
+		originalPath := originalEntry.LinkedFile.FullPath
+		
+		// Get actual file info from both CDs
+		originalFileInfo := originalFileMap[originalPath]
+		modifiedFileInfo := modifiedFileMap[originalPath]
+		
+		if originalFileInfo == nil || modifiedFileInfo == nil {
+			// File missing in one of the CDs
+			if originalFileInfo != nil && modifiedFileInfo == nil {
+				common.LogDebug("File removed in modified CD: %s", originalPath)
+			} else if originalFileInfo == nil && modifiedFileInfo != nil {
+				common.LogDebug("File added in modified CD: %s", originalPath)
+			}
+			continue
+		}
+		
+		// Check if actual file sizes differ (this is what matters for recalculation)
+		sizeChanged := originalFileInfo.Size != modifiedFileInfo.Size
+		
+		// Only include entries with real size changes that require FLA recalculation
+		if sizeChanged {
+			common.LogDebug("File size change detected: %s", originalPath)
+			common.LogDebug("  Original: Size=%d", originalFileInfo.Size)
+			common.LogDebug("  Modified: Size=%d", modifiedFileInfo.Size)
+			
+			diff := FLADifference{
+				EntryIndex:      i,
+				TimecodeChanged: originalFileInfo.MSF != modifiedFileInfo.MSF,
+				SizeChanged:     true,
+				Description:     fmt.Sprintf("Entry %04X: Size changed from %d to %d bytes for file %s", 
+					i, originalFileInfo.Size, modifiedFileInfo.Size, originalPath),
+			}
+			differences = append(differences, diff)
+			
+			// Update the table entries with real file info for proper display
+			if modifiedTable.Entries[i].LinkedFile != nil {
+				modifiedTable.Entries[i].LinkedFile.Size = modifiedFileInfo.Size
+				modifiedTable.Entries[i].LinkedFile.MSF = modifiedFileInfo.MSF
+			}
+		}
+	}
+	
+	common.LogDebug("Found %d file differences between CDs", len(differences))
+	return differences, nil
+}
+
+// RecalculateFLATable recalculates and updates the FLA table in the modified CD image
+func (p *FLAProcessor) RecalculateFLATable(modifiedImagePath string, originalTable, modifiedTable *FileLinkAddressTable, differences []FLADifference) error {
+	common.LogDebug("Starting FLA table recalculation for %s", modifiedImagePath)
+
+	if len(differences) == 0 {
+		common.LogDebug("No differences to recalculate")
+		return nil
+	}
+
+	// Sort differences by entry index to process them in order
+	sort.Slice(differences, func(i, j int) bool {
+		return differences[i].EntryIndex < differences[j].EntryIndex
+	})
+
+	// Calculate cumulative offset for each file change
+	var cumulativeOffset int64 = 0
+	
+	// Apply size changes and recalculate MSF positions
+	for _, diff := range differences {
+		originalEntry := originalTable.Entries[diff.EntryIndex]
+		modifiedEntry := &modifiedTable.Entries[diff.EntryIndex]
+		
+		if originalEntry.LinkedFile != nil && modifiedEntry.LinkedFile != nil {
+			// Calculate size difference
+			sizeDiff := int64(modifiedEntry.LinkedFile.Size) - int64(originalEntry.LinkedFile.Size)
+			cumulativeOffset += sizeDiff
+			
+			common.LogDebug("Entry %04X: Size changed by %d bytes, cumulative offset: %d", 
+				diff.EntryIndex, sizeDiff, cumulativeOffset)
+			
+			// Update the file size in the current entry
+			modifiedEntry.FileSize = modifiedEntry.LinkedFile.Size
+			common.LogDebug("Updated entry %04X: FileSize %d -> %d", 
+				diff.EntryIndex, originalEntry.FileSize, modifiedEntry.FileSize)
+			
+			// Convert sectors to bytes for calculation (each sector = 2048 bytes)
+			sectorOffset := cumulativeOffset / 2048
+			if cumulativeOffset%2048 != 0 {
+				sectorOffset++ // Round up to next sector
+			}
+			
+			// Update MSF positions for all subsequent entries
+			for i := diff.EntryIndex + 1; i < originalTable.Count; i++ {
+				if modifiedTable.Entries[i].LinkedFile != nil {
+					originalMSF := originalTable.Entries[i].Timecode
+					
+					// Calculate new MSF by adding sector offset
+					newTotalSectors := int64(originalMSF.ToSectors()) + sectorOffset
+					if newTotalSectors < 0 {
+						newTotalSectors = 0
+					}
+					
+					// Convert back to MSF
+					newMSF := MSFFromSectors(uint32(newTotalSectors))
+					modifiedTable.Entries[i].Timecode = newMSF
+					
+					common.LogDebug("Updated entry %04X: MSF %s -> %s", 
+						i, originalMSF.String(), newMSF.String())
+				}
+			}
+		}
+	}
+
+	// Write the updated FLA table back to the CD image
+	err := p.writeFLATableToCD(modifiedImagePath, modifiedTable)
+	if err != nil {
+		return fmt.Errorf("failed to write updated FLA table: %w", err)
+	}
+
+	common.LogDebug("Successfully updated FLA table with %d changes", len(differences))
+	return nil
+}
+
+// writeFLATableToCD writes the updated FLA table back to the MAIN0.EXE within the CD image
+func (p *FLAProcessor) writeFLATableToCD(imagePath string, table *FileLinkAddressTable) error {
+	common.LogInfo("=== Starting FLA Table Write Operation ===")
+	common.LogInfo("Target CD image: %s", imagePath)
+	common.LogInfo("FLA table entries to write: %d", table.Count)
+	
+	// Step 1: Find MAIN0.EXE location in the CD
+	reader, err := psx.NewCDReader(imagePath)
+	if err != nil {
+		return fmt.Errorf("failed to open CD image for reading: %w", err)
+	}
+	defer reader.Close()
+
+	// Validate ISO9660 format
+	if err := reader.ValidateISO9660(); err != nil {
+		return fmt.Errorf("invalid ISO9660 image: %w", err)
+	}
+
+	// Read ISO descriptor
+	descriptor, err := reader.ReadISODescriptor()
+	if err != nil {
+		return fmt.Errorf("failed to read ISO descriptor: %w", err)
+	}
+
+	// Parse root directory
+	rootLBA := common.ExtractLBAFromDirRecord(descriptor.RootDirRecord[:])
+	rootSize := common.ExtractSizeFromDirRecord(descriptor.RootDirRecord[:])
+
+	// Find MAIN0.EXE location
+	_, main0LBA, err := p.extractMainExecutableWithLBA(reader, rootLBA, rootSize)
+	if err != nil {
+		return fmt.Errorf("failed to find MAIN0.EXE: %w", err)
+	}
+
+	// Calculate absolute offset within the CD image
+	main0ExeOffset := (main0LBA * 2048) + 0x6E6F0
+	
+	common.LogInfo("MAIN0.EXE located at LBA: %d (byte offset: 0x%X)", main0LBA, main0LBA*2048)
+	common.LogInfo("FLA table offset within MAIN0.EXE: 0x6E6F0")
+	common.LogInfo("Calculated absolute FLA table offset in CD: 0x%X", main0ExeOffset)
+	
+	// Step 2: Close the reader since we'll need write access
+	reader.Close()
+	
+	// Step 3: Prepare new FLA table data
+	var newData []byte
+	for i := uint32(0); i < table.Count; i++ {
+		entry := table.Entries[i]
+		
+		// Create MSF bytes (4 bytes: MM:SS:FF:00)
+		msfBytes := []byte{
+			entry.Timecode.Minutes,
+			entry.Timecode.Seconds, 
+			entry.Timecode.Sectors,
+			entry.Timecode.Unused,
+		}
+		
+		// Create file size bytes (4 bytes, little-endian)
+		sizeBytes := make([]byte, 4)
+		binary.LittleEndian.PutUint32(sizeBytes, entry.FileSize)
+		
+		// Combine MSF and size
+		entryData := append(msfBytes, sizeBytes...)
+		newData = append(newData, entryData...)
+		
+		// Log specific entries for debugging
+		if i < 5 || i == 0x15A || i >= table.Count-5 {
+			common.LogDebug("Entry %04X: MSF %02X:%02X:%02X:00, Size %d (0x%08X)", 
+				i, entry.Timecode.Minutes, entry.Timecode.Seconds, entry.Timecode.Sectors, entry.FileSize, entry.FileSize)
+		}
+	}
+	
+	common.LogInfo("Prepared %d bytes of FLA table data", len(newData))
+	
+	// Step 4: Get file info before opening for write
+	fileInfo, err := os.Stat(imagePath)
+	if err != nil {
+		return fmt.Errorf("failed to get file info: %w", err)
+	}
+	
+	common.LogInfo("CD image file size: %d bytes, write target offset: 0x%X", fileInfo.Size(), main0ExeOffset)
+	
+	if int64(main0ExeOffset) >= fileInfo.Size() {
+		return fmt.Errorf("target offset 0x%X is beyond file size %d", main0ExeOffset, fileInfo.Size())
+	}
+	
+	// Step 5: Open the CD image file for writing with proper flags
+	file, err := os.OpenFile(imagePath, os.O_RDWR|os.O_SYNC, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open CD image for writing: %w", err)
+	}
+	defer func() {
+		// Ensure proper cleanup
+		if syncErr := file.Sync(); syncErr != nil {
+			common.LogDebug("Error during final sync: %v", syncErr)
+		}
+		file.Close()
+	}()
+	
+	// Step 6: Seek to the target position
+	seekPos, err := file.Seek(int64(main0ExeOffset), io.SeekStart)
+	if err != nil {
+		return fmt.Errorf("failed to seek to FLA table offset: %w", err)
+	}
+	
+	common.LogInfo("Seeked to position: 0x%X (target: 0x%X)", seekPos, main0ExeOffset)
+	
+	// Step 7: Write the entire FLA table data at once
+	bytesWritten, err := file.Write(newData)
+	if err != nil {
+		return fmt.Errorf("failed to write FLA table data: %w", err)
+	}
+	
+	common.LogInfo("Successfully wrote %d bytes of FLA table data", bytesWritten)
+	
+	if bytesWritten != len(newData) {
+		return fmt.Errorf("incomplete write: expected %d bytes, wrote %d bytes", len(newData), bytesWritten)
+	}
+	
+	// Step 8: Force immediate sync to disk
+	err = file.Sync()
+	if err != nil {
+		return fmt.Errorf("failed to sync FLA table data to disk: %w", err)
+	}
+	
+	common.LogInfo("Data successfully synced to disk")
+	
+	// Step 9: Verify the write by reading back the data
+	_, err = file.Seek(int64(main0ExeOffset), io.SeekStart)
+	if err != nil {
+		common.LogDebug("Warning: Could not seek back for verification: %v", err)
+	} else {
+		verifyData := make([]byte, len(newData))
+		readBytes, readErr := file.Read(verifyData)
+		if readErr != nil {
+			common.LogDebug("Warning: Could not read back for verification: %v", readErr)
+		} else if readBytes != len(newData) {
+			common.LogDebug("Warning: Verification read incomplete: %d/%d bytes", readBytes, len(newData))
+		} else {
+			// Compare written data with read-back data
+			verifyMatches := true
+			for i := 0; i < len(newData); i++ {
+				if newData[i] != verifyData[i] {
+					verifyMatches = false
+					break
+				}
+			}
+			
+			if verifyMatches {
+				common.LogInfo("✓ Verification successful: Written data matches read-back data")
+			} else {
+				common.LogInfo("✗ Verification failed: Written data does not match read-back data")
+			}
+		}
+	}
+	
+	common.LogInfo("=== FLA Table Write Operation Complete ===")
+	common.LogInfo("Result: %d FLA entries written to offset 0x%X in %s", table.Count, main0ExeOffset, imagePath)
+	
+	return nil
+}
+
+// SaveFLATableToFile saves the FLA table data to a binary file
+func (p *FLAProcessor) SaveFLATableToFile(table *FileLinkAddressTable, filename string) error {
+	common.LogDebug("Saving FLA table to file: %s", filename)
+	
+	// Create the output file
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("failed to create FLA table file: %w", err)
+	}
+	defer file.Close()
+	
+	// Write each FLA entry
+	for i := uint32(0); i < table.Count; i++ {
+		entry := table.Entries[i]
+		
+		// Write MSF timecode (4 bytes: MM:SS:FF:00)
+		msfBytes := []byte{
+			entry.Timecode.Minutes,
+			entry.Timecode.Seconds, 
+			entry.Timecode.Sectors,
+			entry.Timecode.Unused,
+		}
+		
+		_, err = file.Write(msfBytes)
+		if err != nil {
+			return fmt.Errorf("failed to write MSF for entry %d: %w", i, err)
+		}
+		
+		// Write file size (4 bytes, little-endian)
+		err = binary.Write(file, binary.LittleEndian, entry.FileSize)
+		if err != nil {
+			return fmt.Errorf("failed to write file size for entry %d: %w", i, err)
+		}
+	}
+	
+	common.LogDebug("Successfully saved %d FLA entries to file %s", table.Count, filename)
+	return nil
 }

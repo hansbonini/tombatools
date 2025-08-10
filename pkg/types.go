@@ -218,8 +218,40 @@ func (msf MSFTimecode) ToDecimalString() string {
 	minutes := int(msf.Minutes>>4)*10 + int(msf.Minutes&0x0F)
 	seconds := int(msf.Seconds>>4)*10 + int(msf.Seconds&0x0F)
 	sectors := int(msf.Sectors>>4)*10 + int(msf.Sectors&0x0F)
-	
+
 	return fmt.Sprintf("%02d:%02d:%02d", minutes, seconds, sectors)
+}
+
+// ToSectors converts MSF timecode to total sectors count
+func (msf MSFTimecode) ToSectors() uint32 {
+	// Convert BCD to decimal
+	minutes := uint32(msf.Minutes>>4)*10 + uint32(msf.Minutes&0x0F)
+	seconds := uint32(msf.Seconds>>4)*10 + uint32(msf.Seconds&0x0F)
+	sectors := uint32(msf.Sectors>>4)*10 + uint32(msf.Sectors&0x0F)
+
+	// Each minute = 60 seconds, each second = 75 sectors
+	return minutes*60*75 + seconds*75 + sectors
+}
+
+// MSFFromSectors creates an MSF timecode from total sectors count
+func MSFFromSectors(totalSectors uint32) MSFTimecode {
+	// Calculate minutes, seconds, and sectors
+	minutes := totalSectors / (60 * 75)
+	remainder := totalSectors % (60 * 75)
+	seconds := remainder / 75
+	sectors := remainder % 75
+
+	// Convert to BCD format
+	minutesBCD := byte((minutes/10)<<4) | byte(minutes%10)
+	secondsBCD := byte((seconds/10)<<4) | byte(seconds%10)
+	sectorsBCD := byte((sectors/10)<<4) | byte(sectors%10)
+
+	return MSFTimecode{
+		Minutes: minutesBCD,
+		Seconds: secondsBCD,
+		Sectors: sectorsBCD,
+		Unused:  0x00,
+	}
 }
 
 // FileLinkAddressEntry represents a single entry in the File Link Address table
@@ -227,10 +259,10 @@ func (msf MSFTimecode) ToDecimalString() string {
 // - 4 bytes (big-endian): MSF timecode (minutes, seconds, sectors, unused)
 // - 4 bytes (little-endian): file size
 type FileLinkAddressEntry struct {
-	Timecode     MSFTimecode // MSF timecode (4 bytes, big-endian)
-	FileSize     uint32      // File size in bytes (4 bytes, little-endian)
-	LinkedFile   *CDFileInfo // Linked file information from CD (optional)
-	TimecodeDecimal string   // Decimal representation of MSF for comparison
+	Timecode        MSFTimecode // MSF timecode (4 bytes, big-endian)
+	FileSize        uint32      // File size in bytes (4 bytes, little-endian)
+	LinkedFile      *CDFileInfo // Linked file information from CD (optional)
+	TimecodeDecimal string      // Decimal representation of MSF for comparison
 }
 
 // CDFileInfo contains information about a file found in the CD image
@@ -245,7 +277,7 @@ type CDFileInfo struct {
 // String returns a formatted representation of the FLA entry
 func (fla FileLinkAddressEntry) String() string {
 	if fla.LinkedFile != nil {
-		return fmt.Sprintf("MSF: %s (%s), Size: %d bytes, File: %s", 
+		return fmt.Sprintf("MSF: %s (%s), Size: %d bytes, File: %s",
 			fla.Timecode.String(), fla.TimecodeDecimal, fla.FileSize, fla.LinkedFile.FullPath)
 	}
 	return fmt.Sprintf("MSF: %s (%s), Size: %d bytes", fla.Timecode.String(), fla.TimecodeDecimal, fla.FileSize)
@@ -256,6 +288,20 @@ type FileLinkAddressTable struct {
 	Entries []FileLinkAddressEntry // Array of FLA entries
 	Offset  uint32                 // Offset in the executable where the table was found
 	Count   uint32                 // Number of entries in the table
+}
+
+// FLADifference represents a difference between two FLA entries
+type FLADifference struct {
+	EntryIndex      uint32 // Index of the entry in the FLA table
+	TimecodeChanged bool   // Whether the MSF timecode changed
+	SizeChanged     bool   // Whether the file size changed
+	Description     string // Human-readable description of the change
+}
+
+// FLAComparisonResult represents the result of comparing two FLA tables
+type FLAComparisonResult struct {
+	Differences  []FLADifference // List of differences found
+	TotalChanges int             // Total number of changes detected
 }
 
 // FLAProcessor handles File Link Address operations

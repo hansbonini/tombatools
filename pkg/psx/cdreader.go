@@ -54,6 +54,27 @@ func (r *CDReader) Close() error {
 	return nil
 }
 
+// getDataStart determines the data start offset based on sector mode
+func (r *CDReader) getDataStart() int {
+	if len(r.sectorBuffer) < 16 {
+		return 16 // Default to Mode 1
+	}
+
+	// Check mode byte at position 15
+	mode := r.sectorBuffer[15]
+
+	if mode == 1 {
+		// Mode 1: sync(12) + header(4) + data(2048) + edc/ecc(320)
+		return 16
+	} else if mode == 2 {
+		// Mode 2: sync(12) + header(4) + subheader(8) + data(2048) + edc(4) + ecc(276)
+		return 24
+	}
+
+	// Default to Mode 1 if unclear
+	return 16
+}
+
 // SeekToSector seeks to a specific sector - based on mkpsxiso SeekToSector
 func (r *CDReader) SeekToSector(lba int64) error {
 	if lba >= r.totalSectors || lba < 0 {
@@ -91,8 +112,8 @@ func (r *CDReader) ReadBytes(buffer []byte) (int, error) {
 		}
 
 		// Calculate available bytes in current sector (skip CD header/footer)
-		// PlayStation CD-ROM Mode 2 Form 1: sync(12) + header(4) + subheader(8) + data(2048) + edc(4) + ecc(276)
-		dataStart := 24 // Skip sync(12) + header(4) + subheader(8)
+		// Auto-detect sector mode based on current sector content
+		dataStart := r.getDataStart()
 		available := CD_DATA_SIZE - r.currentOffset
 
 		if available <= 0 {
@@ -498,32 +519,31 @@ func (r *CDReader) ExtractFile(lba uint32, fileSize uint32, outputPath string) e
 		return fmt.Errorf("LBA %d out of bounds (total sectors: %d)", lba, r.totalSectors)
 	}
 
-	// Seek to file location
-	if err := r.SeekToSector(int64(lba)); err != nil {
-		return fmt.Errorf("failed to seek to LBA %d: %w", lba, err)
-	}
-
-	// Copy file data with proper sector handling
+	// Copy file data sector by sector
 	bytesLeft := fileSize
 	totalWritten := uint32(0)
+	currentSector := int64(lba)
 
 	for bytesLeft > 0 {
+		// Seek to current sector
+		if err := r.SeekToSector(currentSector); err != nil {
+			return fmt.Errorf("failed to seek to sector %d: %w", currentSector, err)
+		}
+
 		// Calculate how much to read from current sector
-		bytesToRead := CD_DATA_SIZE - uint32(r.currentOffset)
+		bytesToRead := uint32(CD_DATA_SIZE)
 		if bytesToRead > bytesLeft {
 			bytesToRead = bytesLeft
 		}
 
-		// Protect against reading beyond file bounds
-		if bytesToRead == 0 {
-			break
-		}
+		// Debug output (commented out for production)
+		// fmt.Printf("DEBUG: bytesLeft=%d, currentSector=%d, bytesToRead=%d\n", bytesLeft, currentSector, bytesToRead)
 
 		// Read data from current sector
 		buffer := make([]byte, bytesToRead)
 		bytesRead, err := r.ReadBytes(buffer)
 		if err != nil {
-			return fmt.Errorf("failed to read data at offset %d: %w", totalWritten, err)
+			return fmt.Errorf("failed to read data at sector %d: %w", currentSector, err)
 		}
 
 		// Only write the bytes we actually read
@@ -536,6 +556,7 @@ func (r *CDReader) ExtractFile(lba uint32, fileSize uint32, outputPath string) e
 
 		bytesLeft -= uint32(bytesRead)
 		totalWritten += uint32(bytesRead)
+		currentSector++
 
 		// Safety check to prevent infinite loops
 		if bytesRead == 0 {
@@ -575,7 +596,8 @@ func (r *CDReader) ReadSector() (*SectorM2F1, error) {
 	copy(sector.Sync[:], r.sectorBuffer[0:12])
 	copy(sector.Address[:], r.sectorBuffer[12:15])
 	sector.Mode = r.sectorBuffer[15]
-	copy(sector.Data[:], r.sectorBuffer[24:24+CD_DATA_SIZE])
+	dataStart := r.getDataStart()
+	copy(sector.Data[:], r.sectorBuffer[dataStart:dataStart+CD_DATA_SIZE])
 
 	return sector, nil
 }
