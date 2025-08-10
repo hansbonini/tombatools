@@ -132,7 +132,7 @@ Examples:
 		for _, diff := range fileDifferences {
 			originalEntry := originalTable.Entries[diff.EntryIndex]
 			modifiedEntry := modifiedTable.Entries[diff.EntryIndex]
-			
+
 			filename := "NOT LINKED"
 			if modifiedEntry.LinkedFile != nil {
 				filename = modifiedEntry.LinkedFile.FullPath
@@ -176,7 +176,7 @@ func init() {
 
 	// Add verbose flag to recalc command for detailed output
 	flaRecalcCmd.Flags().BoolP("verbose", "v", false, "Enable verbose output (show debug messages)")
-	
+
 	// Add save-table flag to save the recalculated FLA table to a separate .bin file
 	flaRecalcCmd.Flags().StringP("save-table", "s", "", "Save the recalculated FLA table to a .bin file")
 }
